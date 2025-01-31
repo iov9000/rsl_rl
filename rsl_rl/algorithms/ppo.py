@@ -20,6 +20,8 @@ class PPO:
         num_learning_epochs=1,
         num_mini_batches=1,
         clip_param=0.2,
+        clip_param_cf=0.1,
+        cf_loss_coef=0.5,
         gamma=0.998,
         lam=0.95,
         value_loss_coef=1.0,
@@ -55,9 +57,25 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
+        # CF parameters
+        self.clip_param_cf = clip_param_cf
+        self.cf_loss_coef = cf_loss_coef
+
+    def init_storage(
+        self,
+        num_envs,
+        num_transitions_per_env,
+        actor_obs_shape,
+        critic_obs_shape,
+        action_shape,
+    ):
         self.storage = RolloutStorage(
-            num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device
+            num_envs,
+            num_transitions_per_env,
+            actor_obs_shape,
+            critic_obs_shape,
+            action_shape,
+            self.device,
         )
 
     def test_mode(self):
@@ -72,7 +90,9 @@ class PPO:
         # Compute the actions and values
         self.transition.actions = self.actor_critic.act(obs).detach()
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
-        self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
+        self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(
+            self.transition.actions
+        ).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
         # need to record obs and critic_obs before env.step()
@@ -86,7 +106,9 @@ class PPO:
         # Bootstrapping on time outs
         if "time_outs" in infos:
             self.transition.rewards += self.gamma * torch.squeeze(
-                self.transition.values * infos["time_outs"].unsqueeze(1).to(self.device), 1
+                self.transition.values
+                * infos["time_outs"].unsqueeze(1).to(self.device),
+                1,
             )
 
         # Record the transition
@@ -101,10 +123,15 @@ class PPO:
     def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
+        mean_surrogate_loss_cf = 0
         if self.actor_critic.is_recurrent:
-            generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+            generator = self.storage.reccurent_mini_batch_generator(
+                self.num_mini_batches, self.num_learning_epochs
+            )
         else:
-            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+            generator = self.storage.mini_batch_generator(
+                self.num_mini_batches, self.num_learning_epochs
+            )
         for (
             obs_batch,
             critic_obs_batch,
@@ -118,8 +145,12 @@ class PPO:
             hid_states_batch,
             masks_batch,
         ) in generator:
-            self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
-            actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
+            self.actor_critic.act(
+                obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0]
+            )
+            actions_log_prob_batch = self.actor_critic.get_actions_log_prob(
+                actions_batch
+            )
             value_batch = self.actor_critic.evaluate(
                 critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
             )
@@ -132,7 +163,10 @@ class PPO:
                 with torch.inference_mode():
                     kl = torch.sum(
                         torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
-                        + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
+                        + (
+                            torch.square(old_sigma_batch)
+                            + torch.square(old_mu_batch - mu_batch)
+                        )
                         / (2.0 * torch.square(sigma_batch))
                         - 0.5,
                         axis=-1,
@@ -148,25 +182,42 @@ class PPO:
                         param_group["lr"] = self.learning_rate
 
             # Surrogate loss
-            ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
+            ratio = torch.exp(
+                actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch)
+            )
             surrogate = -torch.squeeze(advantages_batch) * ratio
             surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
+            # CF Surrogate loss
+            cf_advantages_batch = advantages_batch.view(-1, self.storage.num_envs, 1)[
+                :, torch.randperm(self.storage.num_envs), :
+            ].reshape(-1, 1)
+            surrogate_cf = -torch.squeeze(cf_advantages_batch) * ratio
+            surrogate_clipped_cf = -torch.squeeze(cf_advantages_batch) * torch.clamp(
+                ratio, 1.0 - self.clip_param_cf, 1.0 + self.clip_param_cf
+            )
+
+            surrogate_loss_cf = torch.max(surrogate_cf, surrogate_clipped_cf).mean()
             # Value function loss
             if self.use_clipped_value_loss:
-                value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(
-                    -self.clip_param, self.clip_param
-                )
+                value_clipped = target_values_batch + (
+                    value_batch - target_values_batch
+                ).clamp(-self.clip_param, self.clip_param)
                 value_losses = (value_batch - returns_batch).pow(2)
                 value_losses_clipped = (value_clipped - returns_batch).pow(2)
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+            loss = (
+                surrogate_loss
+                + self.cf_loss_coef * surrogate_loss_cf
+                + self.value_loss_coef * value_loss
+                - self.entropy_coef * entropy_batch.mean()
+            )
 
             # Gradient step
             self.optimizer.zero_grad()
@@ -176,10 +227,13 @@ class PPO:
 
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
+            mean_surrogate_loss_cf += surrogate_loss_cf.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
+        mean_surrogate_loss_cf /= num_updates
+
         self.storage.clear()
 
-        return mean_value_loss, mean_surrogate_loss
+        return mean_value_loss, mean_surrogate_loss, mean_surrogate_loss_cf
