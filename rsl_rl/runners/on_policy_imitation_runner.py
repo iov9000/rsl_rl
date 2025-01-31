@@ -11,70 +11,56 @@ from collections import deque
 from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 
 import rsl_rl
-from rsl_rl.algorithms import PPO
+from rsl_rl.algorithms import GAIL
 from rsl_rl.env import VecEnv
-from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, EmpiricalNormalization
-from rsl_rl.utils import store_code_state
+from rsl_rl.runners.on_policy_runner import OnPolicyRunner
+from rsl_rl.utils import store_code_state, load_il_demos
 
 
-class OnPolicyRunner:
+class OnPolicyImitationRunner(OnPolicyRunner):
     """On-policy runner for training and evaluation."""
 
     def __init__(self, env: VecEnv, train_cfg, log_dir=None, device="cpu"):
+        super().__init__(env, train_cfg, log_dir, device)
         self.cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
+        self.imitation_cfg = train_cfg["imitation"]
         self.device = device
         self.env = env
         obs, extras = self.env.get_observations()
-        num_obs = obs.shape[1]
-        if "critic" in extras["observations"]:
-            num_critic_obs = extras["observations"]["critic"].shape[1]
-        else:
-            num_critic_obs = num_obs
+        action_shape = env.action_space.shape
+        num_disc_obs = obs.shape[-1]
 
-        self.num_obs = num_obs
-        self.num_critic_obs = num_critic_obs
+        if self.imitation_cfg.use_actions:
+            num_disc_obs += action_shape[-1]
+        if self.imitation_cfg.use_dones:
+            num_disc_obs += 1
+        if self.imitation_cfg.use_next_obs:
+            num_disc_obs += obs.shape[-1]
 
-        actor_critic_class = eval(self.policy_cfg.pop("class_name"))  # ActorCritic
-        actor_critic: ActorCritic | ActorCriticRecurrent = actor_critic_class(
-            num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg
-        ).to(self.device)
-        alg_class = eval(self.alg_cfg.pop("class_name"))  # PPO
-        self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
-        self.num_steps_per_env = self.cfg["num_steps_per_env"]
-        self.save_interval = self.cfg["save_interval"]
-        self.empirical_normalization = self.cfg["empirical_normalization"]
-        if self.empirical_normalization:
-            self.obs_normalizer = EmpiricalNormalization(
-                shape=[num_obs], until=1.0e8
-            ).to(self.device)
-            self.critic_obs_normalizer = EmpiricalNormalization(
-                shape=[num_critic_obs], until=1.0e8
-            ).to(self.device)
-        else:
-            self.obs_normalizer = torch.nn.Identity().to(
-                self.device
-            )  # no normalization
-            self.critic_obs_normalizer = torch.nn.Identity().to(
-                self.device
-            )  # no normalization
-        # init storage and model
-        self.alg.init_storage(
-            self.env.num_envs,
-            self.num_steps_per_env,
-            [num_obs],
-            [num_critic_obs],
-            [self.env.num_actions],
+        self.alg_il = GAIL(
+            actor_critic=self.alg.actor_critic,
+            discriminator=self.imitation_cfg.discriminator(
+                env, self.imitation_cfg, device
+            ),
+            il_opt=self.imitation_cfg,
+            **self.alg_cfg,
         )
 
-        # Log
-        self.log_dir = log_dir
-        self.writer = None
-        self.tot_timesteps = 0
-        self.tot_time = 0
-        self.current_learning_iteration = 0
-        self.git_status_repos = [rsl_rl.__file__]
+        # load demonstrations and initialize demo storage
+        demos = load_il_demos(
+            self.imitation_cfg.irl.demos.demo_dir,
+            env.env_id,
+            self.imitation_cfg.irl.demos.subsamples,
+            n_demos=self.imitation_cfg.irl.demos.n_demos,
+        )
+        self.alg_il.init_demo_storage(
+            demos,
+            self.env.num_envs,
+            [self.num_obs],
+            [self.env.num_actions],
+        )
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
         # initialize writer
@@ -131,30 +117,37 @@ class OnPolicyRunner:
         tot_iter = start_iter + num_learning_iterations
         for it in range(start_iter, tot_iter):
             start = time.time()
-            # Rollout
+
+            # Perform rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs)
-                    obs, rewards, dones, infos = self.env.step(
+                    next_obs, rewards, dones, infos = self.env.step(
                         actions.to(self.env.device)
                     )
                     # move to the right device
-                    obs, critic_obs, rewards, dones = (
-                        obs.to(self.device),
+                    next_obs, critic_obs, rewards, dones = (
+                        next_obs.to(self.device),
                         critic_obs.to(self.device),
                         rewards.to(self.device),
                         dones.to(self.device),
                     )
                     # perform normalization
-                    obs = self.obs_normalizer(obs)
+                    next_obs = self.obs_normalizer(next_obs)
                     if "critic" in infos["observations"]:
                         critic_obs = self.critic_obs_normalizer(
                             infos["observations"]["critic"]
                         )
                     else:
-                        critic_obs = obs
-                    # process the step
-                    self.alg.process_env_step(rewards, dones, infos)
+                        critic_obs = next_obs
+
+                    # compute il rewards instead of env rewards
+                    il_rewards = self.alg_il.compute_reward(
+                        obs, actions, next_obs, dones
+                    )
+
+                    # process the step (add transition to rollout buffer)
+                    self.alg.process_env_step(il_rewards, dones, infos)
 
                     if self.log_dir is not None:
                         # Book keeping
@@ -189,6 +182,9 @@ class OnPolicyRunner:
             stop = time.time()
             learn_time = stop - start
             self.current_learning_iteration = it
+
+            d_loss = self.alg_il.update()
+
             if self.log_dir is not None:
                 self.log(locals())
             if it % self.save_interval == 0:

@@ -192,15 +192,26 @@ class PPO:
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
             # CF Surrogate loss
-            cf_advantages_batch = advantages_batch.view(-1, self.storage.num_envs, 1)[
-                :, torch.randperm(self.storage.num_envs), :
-            ].reshape(-1, 1)
-            surrogate_cf = -torch.squeeze(cf_advantages_batch) * ratio
-            surrogate_clipped_cf = -torch.squeeze(cf_advantages_batch) * torch.clamp(
-                ratio, 1.0 - self.clip_param_cf, 1.0 + self.clip_param_cf
-            )
+            surrogate_loss_cf = 0
 
-            surrogate_loss_cf = torch.max(surrogate_cf, surrogate_clipped_cf).mean()
+            for _ in range(3):
+                cf_advantages_batch = advantages_batch[
+                    torch.randperm(advantages_batch.size(0)), :
+                ]
+                # cf_advantages_batch = advantages_batch.view(-1, self.storage.num_envs, 1)[
+                #     :, torch.randperm(self.storage.num_envs), :
+                # ].reshape(-1, 1)
+                surrogate_cf = -torch.squeeze(cf_advantages_batch) * ratio
+                surrogate_clipped_cf = -torch.squeeze(
+                    cf_advantages_batch
+                ) * torch.clamp(
+                    ratio, 1.0 - self.clip_param_cf, 1.0 + self.clip_param_cf
+                )
+
+                surrogate_loss_cf += torch.max(
+                    surrogate_cf, surrogate_clipped_cf
+                ).mean()
+
             # Value function loss
             if self.use_clipped_value_loss:
                 value_clipped = target_values_batch + (
