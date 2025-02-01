@@ -42,6 +42,14 @@ class OnPolicyImitationRunner(OnPolicyRunner):
         if self.imitation_cfg.use_next_obs:
             num_disc_obs += obs.shape[-1]
 
+        # load demonstrations and initialize demo storage
+        demos = load_il_demos(
+            self.imitation_cfg.demo_dir,
+            env.unwrapped.spec.id,
+            self.imitation_cfg.demo_subsampling_factor,
+            n_demos=self.imitation_cfg.n_demos,
+        )
+
         self.alg_il = GAIL(
             actor_critic=self.alg.actor_critic,
             discriminator=Discriminator(
@@ -50,19 +58,23 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                 use_weight_norm=self.imitation_cfg.use_weight_norm,
             ).to(self.device),
             il_opt=self.imitation_cfg,
+            device=self.device,
             **self.alg_cfg,
         )
 
-        # load demonstrations and initialize demo storage
-        demos = load_il_demos(
-            self.imitation_cfg.demo_dir,
-            env.unwrapped.spec.id,
-            self.imitation_cfg.demo_subsampling_factor,
-            n_demos=self.imitation_cfg.n_demos,
+        # init storage and model
+        self.alg_il.init_storage(
+            self.env.num_envs,
+            self.num_steps_per_env,
+            [self.num_obs],
+            [self.num_critic_obs],
+            [self.env.num_actions],
         )
+
         self.alg_il.init_storage_from_demos(
             demos,
             self.env.num_envs,
+            self.num_steps_per_env,
             [self.num_obs],
             [self.env.num_actions],
         )
@@ -126,7 +138,7 @@ class OnPolicyImitationRunner(OnPolicyRunner):
             # Perform rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
-                    actions = self.alg.act(obs, critic_obs)
+                    actions = self.alg_il.act(obs, critic_obs)
                     next_obs, rewards, dones, infos = self.env.step(
                         actions.to(self.env.device)
                     )
@@ -150,7 +162,7 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                     il_rewards = self.alg_il.get_reward(obs, actions, next_obs, dones)
 
                     # process the step (add transition to rollout buffer)
-                    self.alg.process_env_step(il_rewards, dones, infos)
+                    self.alg_il.process_env_step(il_rewards, dones, infos)
 
                     if self.log_dir is not None:
                         # Book keeping
@@ -177,11 +189,9 @@ class OnPolicyImitationRunner(OnPolicyRunner):
 
                 # Learning step
                 start = stop
-                self.alg.compute_returns(critic_obs)
+                self.alg_il.compute_returns(critic_obs)
 
-            mean_value_loss, mean_surrogate_loss, mean_surrogate_loss_cf = (
-                self.alg_il.update_ac()
-            )
+            mean_value_loss, mean_surrogate_loss = self.alg_il.update_ac()
             stop = time.time()
             learn_time = stop - start
             self.current_learning_iteration = it
@@ -234,7 +244,7 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                 else:
                     self.writer.add_scalar("Episode/" + key, value, locs["it"])
                     ep_string += f"""{f"Mean episode {key}:":>{pad}} {value:.4f}\n"""
-        mean_std = self.alg.actor_critic.std.mean()
+        mean_std = self.alg_il.actor_critic.std.mean()
         fps = int(
             self.num_steps_per_env
             * self.env.num_envs
@@ -247,10 +257,11 @@ class OnPolicyImitationRunner(OnPolicyRunner):
         self.writer.add_scalar(
             "Loss/surrogate", locs["mean_surrogate_loss"], locs["it"]
         )
+        print(locs["d_loss"])
+        self.writer.add_scalar("Loss/d_loss", locs["d_loss"], locs["it"])
         self.writer.add_scalar(
-            "Loss/surrogate_cf", locs["mean_surrogate_loss_cf"], locs["it"]
+            "Loss/learning_rate", self.alg_il.learning_rate, locs["it"]
         )
-        self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar(
@@ -319,8 +330,8 @@ class OnPolicyImitationRunner(OnPolicyRunner):
 
     def save(self, path, infos=None):
         saved_dict = {
-            "model_state_dict": self.alg.actor_critic.state_dict(),
-            "optimizer_state_dict": self.alg.optimizer.state_dict(),
+            "model_state_dict": self.alg_il.actor_critic.state_dict(),
+            "optimizer_state_dict": self.alg_il.optimizer.state_dict(),
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
@@ -337,38 +348,38 @@ class OnPolicyImitationRunner(OnPolicyRunner):
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
-        self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
+        self.alg_il.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
         if self.empirical_normalization:
             self.obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
             self.critic_obs_normalizer.load_state_dict(
                 loaded_dict["critic_obs_norm_state_dict"]
             )
         if load_optimizer:
-            self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+            self.alg_il.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
         self.current_learning_iteration = loaded_dict["iter"]
         return loaded_dict["infos"]
 
     def get_inference_policy(self, device=None):
         self.eval_mode()  # switch to evaluation mode (dropout for example)
         if device is not None:
-            self.alg.actor_critic.to(device)
-        policy = self.alg.actor_critic.act_inference
+            self.alg_il.actor_critic.to(device)
+        policy = self.alg_il.actor_critic.act_inference
         if self.cfg["empirical_normalization"]:
             if device is not None:
                 self.obs_normalizer.to(device)
-            policy = lambda x: self.alg.actor_critic.act_inference(
+            policy = lambda x: self.alg_il.actor_critic.act_inference(
                 self.obs_normalizer(x)
             )  # noqa: E731
         return policy
 
     def train_mode(self):
-        self.alg.actor_critic.train()
+        self.alg_il.actor_critic.train()
         if self.empirical_normalization:
             self.obs_normalizer.train()
             self.critic_obs_normalizer.train()
 
     def eval_mode(self):
-        self.alg.actor_critic.eval()
+        self.alg_il.actor_critic.eval()
         if self.empirical_normalization:
             self.obs_normalizer.eval()
             self.critic_obs_normalizer.eval()

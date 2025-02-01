@@ -15,10 +15,11 @@ from rsl_rl.algorithms.ppo import PPO
 class GAIL(PPO):
     discriminator: Discriminator
 
-    def __init__(self, actor_critic, discriminator, il_opt, **kwargs):
+    def __init__(self, actor_critic, discriminator, il_opt, device, **kwargs):
         # init gail
         super().__init__(
             actor_critic,
+            device=device,
             **kwargs,
         )
 
@@ -30,12 +31,12 @@ class GAIL(PPO):
         self.use_spectral_norm = il_opt.use_spectral_norm
         self.l2_coeff = il_opt.l2_coeff
         self.divergence_type = il_opt.divergence_type
+        self.num_irl_epochs = il_opt.num_irl_epochs
 
         # GAIL components
         self.discriminator = discriminator
         self.discriminator.to(self.device)
 
-        self.storage = None  # initialized later
         self.optimizer_d = optim.Adam(
             self.discriminator.parameters(), lr=self.il_lr, weight_decay=self.l2_coeff
         )
@@ -44,13 +45,15 @@ class GAIL(PPO):
         self,
         demos,
         num_envs,
+        num_transitions_per_env,
         obs_shape,
         action_shape,
     ):
         self.demos_storage = DemoBuffer(
             num_envs,
-            obs_shape,
-            action_shape,
+            num_transitions_per_env,
+            obs_shape[-1],
+            action_shape[-1],
             self.device,
         )
         self.demos_storage.load_demos(demos)
@@ -165,7 +168,7 @@ class GAIL(PPO):
 
         return mean_value_loss, mean_surrogate_loss
 
-    def compute_discriminator_loss(
+    def compute_loss(
         self,
         exp_obs,
         exp_acs,
@@ -181,7 +184,7 @@ class GAIL(PPO):
 
         labels = torch.cat(
             [torch.zeros(expert_out.size()), torch.ones(policy_out.size())]
-        )
+        ).to(self.device)
         bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(d_out, labels)
 
         return bce_loss
@@ -235,7 +238,9 @@ class GAIL(PPO):
         generator = self.storage.mini_batch_generator(
             self.num_mini_batches, self.num_learning_epochs
         )
-        # TODO: zip with storage generator?
+        # TODO: make sure all demo transitions are used!!!
+        d_loss_avg = 0
+        update_cnt = 0
         for (
             exp_obs_batch,
             exp_actions_batch,
@@ -255,10 +260,13 @@ class GAIL(PPO):
                 hid_states_batch,
                 masks_batch,
             ) in generator:
-                d_loss = self.alg_il.compute_loss(
+                d_loss = self.compute_loss(
                     exp_obs_batch, exp_actions_batch, obs_batch, actions_batch
                 )
-
+                d_loss_avg += d_loss.item()
+                update_cnt += 1
                 self.optimizer_d.zero_grad()
                 d_loss.backward()
                 self.optimizer_d.step()
+
+        return d_loss_avg / update_cnt

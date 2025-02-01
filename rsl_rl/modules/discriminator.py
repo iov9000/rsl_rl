@@ -78,60 +78,11 @@ class Discriminator(nn.Module):
             )
         ]
 
+    def forward(self, x):
+        return self.discriminator_network(x)
+
     def reset(self, dones=None):
         pass
-
-    def forward(self, ob, ac, nob, d):
-        if isinstance(ob, dict):
-            ob = ob["policy"]
-        if len(ob.shape) != len(ac.shape):
-            ac = torch.unsqueeze(ac, -1)
-        if d is not None:
-            if len(ob.shape) != len(d.shape):
-                d = torch.unsqueeze(d, -1)
-
-        input_ = [ob]
-        if self.use_actions:
-            input_.append(ac)
-        if self.use_next_obs:
-            input_.append(nob)
-        if self.use_dones:
-            input_.append(d)
-
-        net_input = torch.cat(input_, axis=-1)
-
-        return self.discriminator_network(net_input)
-
-    @property
-    def action_mean(self):
-        return self.distribution.mean
-
-    @property
-    def action_std(self):
-        return self.distribution.stddev
-
-    @property
-    def entropy(self):
-        return self.distribution.entropy().sum(dim=-1)
-
-    def update_distribution(self, observations):
-        mean = self.actor(observations)
-        self.distribution = Normal(mean, mean * 0.0 + self.std)
-
-    def act(self, observations, **kwargs):
-        self.update_distribution(observations)
-        return self.distribution.sample()
-
-    def get_actions_log_prob(self, actions):
-        return self.distribution.log_prob(actions).sum(dim=-1)
-
-    def act_inference(self, observations):
-        actions_mean = self.actor(observations)
-        return actions_mean
-
-    def evaluate(self, critic_observations, **kwargs):
-        value = self.critic(critic_observations)
-        return value
 
 
 def get_activation(act_name):

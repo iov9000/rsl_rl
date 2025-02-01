@@ -343,8 +343,8 @@ class DemoBuffer:
 
         self.obs_shape = obs_shape
         self.actions_shape = actions_shape
-        self.num_transitions_per_env = num_transitions_per_env
         self.num_envs = num_envs
+        self.num_transitions_per_env = num_transitions_per_env
 
         # rnn
         self.saved_hidden_states_a = None
@@ -353,38 +353,20 @@ class DemoBuffer:
         self.step = 0
 
     def load_demos(self, demos):
-        self.observations = (
-            demos["obs"]
-            .view(-1, 1, self.obs_shape)
-            .expand(-1, self.num_envs, self.obs_shape)
-            .contiguous()
-            .view(-1, self.obs_shape)
-        ).to(self.device)
-        self.actions = (
-            demos["acs"]
-            .view(-1, 1, self.actions_shape)
-            .expand(-1, self.num_envs, self.actions_shape)
-            .contiguous()
-            .view(-1, self.actions_shape)
-        ).to(self.device)
-        self.rewards = (
-            demos["rew"]
-            .view(-1, 1, 1)
-            .expand(-1, self.num_envs, 1)
-            .contiguous()
-            .view(-1, 1)
-        ).to(self.device)
-        self.dones = (
-            torch.logical_or(demos["term"], demos["trunc"])
-            .view(-1, 1, 1)
-            .expand(-1, self.num_envs, 1)
-            .contiguous()
-            .view(-1, 1)
-        ).to(self.device)
+        self.observations = demos["obs"].to(self.device)
+        self.actions = demos["acs"].to(self.device)
+        self.rewards = demos["rew"].to(self.device)
+        self.dones = torch.logical_or(demos["term"], demos["trunc"]).to(self.device)
+
+        # self.observations = (
+        #     demos["obs"][:, 0, :]
+        #     .view(-1, 1, self.obs_shape)
+        #     .expand(-1, self.num_envs, self.obs_shape)
+        #     .contiguous()
+        #     .view(-1, self.obs_shape)
+        # ).to(self.device)
 
     def add_transitions(self, transition: Transition):
-        if self.step >= self.num_transitions_per_env:
-            raise AssertionError("Rollout buffer overflow")
         self.observations[self.step].copy_(transition.observations)
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
