@@ -31,6 +31,7 @@ class GAIL(PPO):
         self.use_ll_weight_norm = il_opt.irl.use_ll_weight_norm
         self.use_spectral_norm = il_opt.irl.use_spectral_norm
         self.l2_coeff = il_opt.irl.l2_coeff
+        self.divergence_type = il_opt.irl.divergence_type
 
         # GAIL components
         self.discriminator = discriminator
@@ -164,35 +165,91 @@ class GAIL(PPO):
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
 
-        self.storage.clear()
-
         return mean_value_loss, mean_surrogate_loss
 
-    def compute_batch_loss(self, update_dict):
-        # Discriminator loss
-        d_loss = self.discriminator.compute_loss(update_dict)
-        # Policy loss
-        policy_loss = self.compute_policy_loss(update_dict)
+    def compute_discriminator_loss(
+        self,
+        exp_obs,
+        exp_acs,
+        policy_obs,
+        policy_acs,
+        exp_obs_next=None,
+        exp_dones=None,
+    ):
+        policy_out = self.forward(policy_obs, policy_acs)
+        expert_out = self.forward(exp_obs, exp_acs)
 
-        return {
-            "d_loss": d_loss,
-            "policy_loss": policy_loss,
-        }
+        d_out = torch.cat([expert_out, policy_out])
+
+        labels = torch.cat(
+            [torch.zeros(expert_out.size()), torch.ones(policy_out.size())]
+        )
+        bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(d_out, labels)
+
+        return bce_loss
+
+    def forward(self, ob, ac, nob=None, d=None):
+        d_out = self.discriminator(ob, ac, nob, d)
+
+        if self.divergence_type == "fkl":
+            d_out_div = torch.exp(d_out)  # (N*T,) p/q TODO: clip
+        elif self.divergence_type == "rkl":
+            d_out_div = d_out  # (N*T,) log (p/q)
+        elif (
+            self.divergence_type == "js"
+        ):  # https://pytorch.org/docs/master/generated/torch.nn.Softplus.html
+            d_out_div = torch.nn.functional.softplus(d_out)  # (N*T,) log (1 + p/q)
+
+        # XXX: log D vs log(1-D)!!!!
+        return d_out_div
+
+    def get_reward(self, ob, ac, nob=None, d=None):
+        d_out = self.discriminator(ob, ac, nob, d)
+
+        if self.divergence_type == "fkl":
+            d_out_div = torch.exp(d_out)  # (N*T,) p/q TODO: clip
+        elif self.divergence_type == "rkl":
+            d_out_div = d_out  # (N*T,) log (p/q)
+        elif (
+            self.divergence_type == "js"
+        ):  # https://pytorch.org/docs/master/generated/torch.nn.Softplus.html
+            d_out_div = torch.nn.functional.softplus(d_out)  # (N*T,) log (1 + p/q)
+
+        # XXX: log D vs log(1-D)!!!!
+        self.reward = -torch.squeeze(torch.log(torch.sigmoid(d_out_div) + 1e-8))
+        return self.reward
 
     def update_discriminator(self):
         demos_generator = self.demos_storage.mini_batch_generator(
             self.num_mini_batches, self.num_irl_epochs
         )
-
+        generator = self.storage.mini_batch_generator(
+            self.num_mini_batches, self.num_learning_epochs
+        )
         # TODO: zip with storage generator?
-        for obs_batch, actions_batch, next_obs_batch, dones_batch in demos_generator:
-            update_dict = prepare_batch_update_irl_isaac(
-                env, cfg, d, obs_, actions_, dones_
-            )
+        for (
+            exp_obs_batch,
+            exp_actions_batch,
+            exp_next_obs_batch,
+            exp_dones_batch,
+        ) in demos_generator:
+            for (
+                obs_batch,
+                critic_obs_batch,
+                actions_batch,
+                target_values_batch,
+                advantages_batch,
+                returns_batch,
+                old_actions_log_prob_batch,
+                old_mu_batch,
+                old_sigma_batch,
+                hid_states_batch,
+                masks_batch,
+            ) in generator:
+                d_loss = self.alg_il.compute_loss(
+                    exp_obs_batch, exp_actions_batch, obs_batch, actions_batch
+                )
 
-            loss_dict = self.alg_il.compute_loss(update_dict)
-
-            loss = loss_dict["d_loss"]
-            self.optimizer_d.zero_grad()
-            loss.backward()
-            self.optimizer_d.step()
+                self.optimizer_d.zero_grad()
+                d_loss.backward()
+                self.optimizer_d.step()

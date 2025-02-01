@@ -9,6 +9,17 @@ import pathlib
 import torch
 import numpy as np
 import pickle
+from torch.nn.utils import spectral_norm, weight_norm
+
+
+def linlayer(in_dim, out_dim, bias=True, wnorm=False, snorm=False):
+    # return layer_init(nn.Linear(in_dim, out_dim, bias=bias))
+    if wnorm:
+        return weight_norm(torch.nn.Linear(in_dim, out_dim, bias=bias), "weight")
+    elif snorm:
+        return spectral_norm(torch.nn.Linear(in_dim, out_dim, bias=bias), "weight")
+    else:
+        return torch.nn.Linear(in_dim, out_dim, bias=bias)
 
 
 def split_and_pad_trajectories(tensor, dones):

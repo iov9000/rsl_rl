@@ -13,6 +13,7 @@ from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 import rsl_rl
 from rsl_rl.algorithms import GAIL
 from rsl_rl.env import VecEnv
+from rsl_rl.modules import Discriminator
 from rsl_rl.runners.on_policy_runner import OnPolicyRunner
 from rsl_rl.utils import store_code_state, load_il_demos
 
@@ -41,9 +42,11 @@ class OnPolicyImitationRunner(OnPolicyRunner):
 
         self.alg_il = GAIL(
             actor_critic=self.alg.actor_critic,
-            discriminator=self.imitation_cfg.discriminator(
-                env, self.imitation_cfg, device
-            ),
+            discriminator=Discriminator(
+                num_disc_obs,
+                use_spectral_norm=self.imitation_cfg.use_spectral_norm,
+                use_weight_norm=self.imitation_cfg.use_weight_norm,
+            ).to(self.device),
             il_opt=self.imitation_cfg,
             **self.alg_cfg,
         )
@@ -177,13 +180,16 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                 self.alg.compute_returns(critic_obs)
 
             mean_value_loss, mean_surrogate_loss, mean_surrogate_loss_cf = (
-                self.alg.update()
+                self.alg_il.update_ac()
             )
             stop = time.time()
             learn_time = stop - start
             self.current_learning_iteration = it
 
-            d_loss = self.alg_il.update()
+            d_loss = self.alg_il.update_discriminator()
+
+            # clear the rollout buffer storage
+            self.alg_il.storage.clear()
 
             if self.log_dir is not None:
                 self.log(locals())
