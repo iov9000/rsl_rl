@@ -22,16 +22,14 @@ class GAIL(PPO):
             **kwargs,
         )
 
-        self.il_lr = il_opt.irl.disc_lr
-        self.lr = il_opt.irl.disc_lr
-        self.use_actions = il_opt.irl.use_actions
-        self.use_dones = il_opt.irl.use_dones
-        self.use_next_obs = il_opt.irl.use_next_obs
-        self.use_weight_norm = il_opt.irl.use_weight_norm
-        self.use_ll_weight_norm = il_opt.irl.use_ll_weight_norm
-        self.use_spectral_norm = il_opt.irl.use_spectral_norm
-        self.l2_coeff = il_opt.irl.l2_coeff
-        self.divergence_type = il_opt.irl.divergence_type
+        self.il_lr = il_opt.learning_rate
+        self.use_actions = il_opt.use_actions
+        self.use_dones = il_opt.use_dones
+        self.use_next_obs = il_opt.use_next_obs
+        self.use_weight_norm = il_opt.use_weight_norm
+        self.use_spectral_norm = il_opt.use_spectral_norm
+        self.l2_coeff = il_opt.l2_coeff
+        self.divergence_type = il_opt.divergence_type
 
         # GAIL components
         self.discriminator = discriminator
@@ -188,8 +186,19 @@ class GAIL(PPO):
 
         return bce_loss
 
+    def concatenate_inputs(self, ob, ac, nob, d):
+        input_ = [ob]
+        if self.use_actions:
+            input_.append(ac)
+        if self.use_next_obs:
+            input_.append(nob)
+        if self.use_dones:
+            input_.append(d)
+
+        return torch.cat(input_, axis=-1)
+
     def forward(self, ob, ac, nob=None, d=None):
-        d_out = self.discriminator(ob, ac, nob, d)
+        d_out = self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
 
         if self.divergence_type == "fkl":
             d_out_div = torch.exp(d_out)  # (N*T,) p/q TODO: clip
@@ -204,7 +213,7 @@ class GAIL(PPO):
         return d_out_div
 
     def get_reward(self, ob, ac, nob=None, d=None):
-        d_out = self.discriminator(ob, ac, nob, d)
+        d_out = self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
 
         if self.divergence_type == "fkl":
             d_out_div = torch.exp(d_out)  # (N*T,) p/q TODO: clip

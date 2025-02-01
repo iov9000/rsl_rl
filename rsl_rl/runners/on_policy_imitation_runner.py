@@ -8,6 +8,8 @@ import statistics
 import time
 import torch
 from collections import deque
+from argparse import Namespace
+
 from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 
 import rsl_rl
@@ -26,7 +28,7 @@ class OnPolicyImitationRunner(OnPolicyRunner):
         self.cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
-        self.imitation_cfg = train_cfg["imitation"]
+        self.imitation_cfg = Namespace(**train_cfg["imitation"])
         self.device = device
         self.env = env
         obs, extras = self.env.get_observations()
@@ -53,12 +55,12 @@ class OnPolicyImitationRunner(OnPolicyRunner):
 
         # load demonstrations and initialize demo storage
         demos = load_il_demos(
-            self.imitation_cfg.irl.demos.demo_dir,
-            env.env_id,
-            self.imitation_cfg.irl.demos.subsamples,
-            n_demos=self.imitation_cfg.irl.demos.n_demos,
+            self.imitation_cfg.demo_dir,
+            env.unwrapped.spec.id,
+            self.imitation_cfg.demo_subsampling_factor,
+            n_demos=self.imitation_cfg.n_demos,
         )
-        self.alg_il.init_demo_storage(
+        self.alg_il.init_storage_from_demos(
             demos,
             self.env.num_envs,
             [self.num_obs],
@@ -145,9 +147,7 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                         critic_obs = next_obs
 
                     # compute il rewards instead of env rewards
-                    il_rewards = self.alg_il.compute_reward(
-                        obs, actions, next_obs, dones
-                    )
+                    il_rewards = self.alg_il.get_reward(obs, actions, next_obs, dones)
 
                     # process the step (add transition to rollout buffer)
                     self.alg.process_env_step(il_rewards, dones, infos)

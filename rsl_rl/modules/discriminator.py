@@ -52,13 +52,11 @@ class Discriminator(nn.Module):
                 )
             else:
                 disc_layers.append(
-                    nn.Linear(
-                        linlayer(
-                            hidden_dims[layer_index],
-                            hidden_dims[layer_index + 1],
-                            wnorm=use_weight_norm,
-                            snorm=use_spectral_norm,
-                        )
+                    linlayer(
+                        hidden_dims[layer_index],
+                        hidden_dims[layer_index + 1],
+                        wnorm=use_weight_norm,
+                        snorm=use_spectral_norm,
                     )
                 )
                 disc_layers.append(activation)
