@@ -33,6 +33,7 @@ class GAIL(PPO):
         self.divergence_type = il_opt.divergence_type
         self.num_irl_epochs = il_opt.num_irl_epochs
         self.irl_batch_size = il_opt.irl_batch_size
+        self.loss_type = il_opt.loss_type
 
         # GAIL components
         self.discriminator = discriminator
@@ -186,9 +187,12 @@ class GAIL(PPO):
         labels = torch.cat(
             [torch.zeros(expert_out.size()), torch.ones(policy_out.size())]
         ).to(self.device)
-        bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(d_out, labels)
+        if self.loss_type == "bce":
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(d_out, labels)
+        elif self.loss_type == "ls":
+            loss = torch.sum((expert_out - 1) ** 2 + (policy_out + 1) ** 2)
 
-        return bce_loss
+        return loss
 
     def concatenate_inputs(self, ob, ac, nob, d):
         input_ = [ob]
@@ -229,7 +233,15 @@ class GAIL(PPO):
             d_out_div = torch.nn.functional.softplus(d_out)  # (N*T,) log (1 + p/q)
 
         # XXX: log D vs log(1-D)!!!!
-        self.reward = -torch.squeeze(torch.log(torch.sigmoid(d_out_div) + 1e-8))
+        if self.loss_type == "bce":
+            self.reward = -torch.squeeze(torch.log(torch.sigmoid(d_out_div) + 1e-8))
+        elif self.loss_type == "ls":
+            self.reward = torch.squeeze(
+                torch.maximum(
+                    torch.zeros_like(d_out_div), 1 - 0.25 * (d_out_div - 1) ** 2
+                )
+            )
+
         return self.reward
 
     def update_discriminator(self):
@@ -251,9 +263,7 @@ class GAIL(PPO):
                 exp_next_obs_batch,
                 exp_dones_batch,
             ) in demos_generator:
-                rollout_buffer_batch = self.storage.get_random_batch(
-                    self.irl_batch_size
-                )
+                rollout_buffer_batch = self.storage.get_random_batch(len(exp_obs_batch))
                 obs_batch = rollout_buffer_batch[0]
                 actions_batch = rollout_buffer_batch[2]
 

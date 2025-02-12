@@ -183,7 +183,7 @@ class RolloutStorage:
         trajectory_lengths = done_indices[1:] - done_indices[:-1]
         return trajectory_lengths.float().mean(), self.rewards.mean()
 
-    def get_random_batch(self, batch_size):
+    def get_random_batch(self, batch_size, shuffle=True):
         observations = self.observations.flatten(0, 1)
         if self.privileged_observations is not None:
             critic_observations = self.privileged_observations.flatten(0, 1)
@@ -198,7 +198,14 @@ class RolloutStorage:
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
 
-        indices = torch.randint(0, len(observations), (batch_size,), device=self.device)
+        if shuffle:
+            indices = torch.randint(
+                0, len(observations), (batch_size,), device=self.device
+            )
+        else:
+            idx = torch.randint(0, len(observations) - batch_size, (1,)).item()
+            indices = torch.arange(idx, idx + batch_size, device=self.device)
+
         return (
             observations[indices],
             critic_observations[indices],

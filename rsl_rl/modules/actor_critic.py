@@ -8,6 +8,9 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 
+LOG_STD_MAX = 2
+LOG_STD_MIN = -5
+
 
 class ActorCritic(nn.Module):
     is_recurrent = False
@@ -39,9 +42,16 @@ class ActorCritic(nn.Module):
         actor_layers.append(activation)
         for layer_index in range(len(actor_hidden_dims)):
             if layer_index == len(actor_hidden_dims) - 1:
-                actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], num_actions))
+                actor_layers.append(
+                    nn.Linear(actor_hidden_dims[layer_index], num_actions)
+                )
             else:
-                actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
+                actor_layers.append(
+                    nn.Linear(
+                        actor_hidden_dims[layer_index],
+                        actor_hidden_dims[layer_index + 1],
+                    )
+                )
                 actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
 
@@ -53,7 +63,12 @@ class ActorCritic(nn.Module):
             if layer_index == len(critic_hidden_dims) - 1:
                 critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], 1))
             else:
-                critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], critic_hidden_dims[layer_index + 1]))
+                critic_layers.append(
+                    nn.Linear(
+                        critic_hidden_dims[layer_index],
+                        critic_hidden_dims[layer_index + 1],
+                    )
+                )
                 critic_layers.append(activation)
         self.critic = nn.Sequential(*critic_layers)
 
@@ -75,7 +90,9 @@ class ActorCritic(nn.Module):
     def init_weights(sequential, scales):
         [
             torch.nn.init.orthogonal_(module.weight, gain=scales[idx])
-            for idx, module in enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))
+            for idx, module in enumerate(
+                mod for mod in sequential if isinstance(mod, nn.Linear)
+            )
         ]
 
     def reset(self, dones=None):
@@ -98,6 +115,9 @@ class ActorCritic(nn.Module):
 
     def update_distribution(self, observations):
         mean = self.actor(observations)
+        # action_logstd = torch.tanh(self.std.expand_as(mean))
+        # log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (action_logstd + 1)
+        # action_std = torch.exp(log_std)
         self.distribution = Normal(mean, mean * 0.0 + self.std)
 
     def act(self, observations, **kwargs):
