@@ -183,13 +183,7 @@ class RolloutStorage:
         trajectory_lengths = done_indices[1:] - done_indices[:-1]
         return trajectory_lengths.float().mean(), self.rewards.mean()
 
-    def mini_batch_generator(self, num_mini_batches, num_epochs=8):
-        batch_size = self.num_envs * self.num_transitions_per_env
-        mini_batch_size = batch_size // num_mini_batches
-        indices = torch.randperm(
-            num_mini_batches * mini_batch_size, requires_grad=False, device=self.device
-        )
-
+    def get_random_batch(self, batch_size):
         observations = self.observations.flatten(0, 1)
         if self.privileged_observations is not None:
             critic_observations = self.privileged_observations.flatten(0, 1)
@@ -203,6 +197,54 @@ class RolloutStorage:
         advantages = self.advantages.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
+
+        indices = torch.randint(0, len(observations), (batch_size,), device=self.device)
+        return (
+            observations[indices],
+            critic_observations[indices],
+            actions[indices],
+            values[indices],
+            advantages[indices],
+            returns[indices],
+            old_actions_log_prob[indices],
+            old_mu[indices],
+            old_sigma[indices],
+        )
+
+    def mini_batch_generator(self, num_mini_batches, num_epochs=8, flatten=True):
+        batch_size = self.num_envs * self.num_transitions_per_env
+        mini_batch_size = batch_size // num_mini_batches
+        indices = torch.randperm(
+            num_mini_batches * mini_batch_size, requires_grad=False, device=self.device
+        )
+
+        if flatten:
+            observations = self.observations.flatten(0, 1)
+            if self.privileged_observations is not None:
+                critic_observations = self.privileged_observations.flatten(0, 1)
+            else:
+                critic_observations = observations
+
+            actions = self.actions.flatten(0, 1)
+            values = self.values.flatten(0, 1)
+            returns = self.returns.flatten(0, 1)
+            old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
+            advantages = self.advantages.flatten(0, 1)
+            old_mu = self.mu.flatten(0, 1)
+            old_sigma = self.sigma.flatten(0, 1)
+        else:
+            observations = self.observations
+            if self.privileged_observations is not None:
+                critic_observations = self.privileged_observations
+            else:
+                critic_observations = observations
+            actions = self.actions
+            values = self.values
+            returns = self.returns
+            old_actions_log_prob = self.actions_log_prob
+            advantages = self.advantages
+            old_mu = self.mu
+            old_sigma = self.sigma
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -358,6 +400,8 @@ class DemoBuffer:
         self.rewards = demos["rew"].to(self.device)
         self.dones = torch.logical_or(demos["term"], demos["trunc"]).to(self.device)
 
+        self.num_demo_envs = demos["obs"].shape[1]
+
         # self.observations = (
         #     demos["obs"][:, 0, :]
         #     .view(-1, 1, self.obs_shape)
@@ -389,32 +433,43 @@ class DemoBuffer:
         trajectory_lengths = done_indices[1:] - done_indices[:-1]
         return trajectory_lengths.float().mean(), self.rewards.mean()
 
-    def mini_batch_generator(self, num_mini_batches, num_epochs=8):
-        batch_size = self.num_envs * self.num_transitions_per_env
-        mini_batch_size = batch_size // num_mini_batches
-        indices = torch.randperm(
-            num_mini_batches * mini_batch_size, requires_grad=False, device=self.device
-        )
+    def get_num_minibatches(self, batch_size):
+        buffer_size = len(self.observations)
 
-        observations = self.observations.flatten(0, 1)
-        actions = self.actions.flatten(0, 1)
-        rewards = self.rewards.flatten(0, 1)
-        dones = self.dones.flatten(0, 1)
+        return buffer_size // batch_size
 
-        for epoch in range(num_epochs):
-            for i in range(num_mini_batches):
-                start = i * mini_batch_size
-                end = (i + 1) * mini_batch_size
-                batch_idx = indices[start:end]
+    def mini_batch_generator(self, batch_size, shuffle=False, flatten=True):
+        if flatten:
+            observations = self.observations.flatten(0, 1)
+            actions = self.actions.flatten(0, 1)
+            rewards = self.rewards.flatten(0, 1)
+            dones = self.dones.flatten(0, 1)
+        else:
+            observations = self.observations
+            actions = self.actions
+            rewards = self.rewards
+            dones = self.dones
 
-                obs_batch = observations[batch_idx]
-                actions_batch = actions[batch_idx]
-                rewards_batch = rewards[batch_idx]
-                dones_batch = dones[batch_idx]
+        buffer_size = len(self.observations)
 
-                yield (
-                    obs_batch,
-                    actions_batch,
-                    rewards_batch,
-                    dones_batch,
-                )
+        if shuffle:
+            indices = torch.randperm(buffer_size, device=self.device)
+        else:
+            indices = torch.arange(buffer_size, device=self.device)
+
+        for i in range(batch_size, buffer_size - 1, batch_size):
+            start = i
+            end = i + batch_size
+            batch_idx = indices[start:end]
+
+            obs_batch = observations[batch_idx]
+            actions_batch = actions[batch_idx]
+            rewards_batch = rewards[batch_idx]
+            dones_batch = dones[batch_idx]
+
+            yield (
+                obs_batch,
+                actions_batch,
+                rewards_batch,
+                dones_batch,
+            )

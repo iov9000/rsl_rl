@@ -122,8 +122,13 @@ class OnPolicyImitationRunner(OnPolicyRunner):
 
         ep_infos = []
         rewbuffer = deque(maxlen=100)
+        il_rewbuffer = deque(maxlen=100)
+
         lenbuffer = deque(maxlen=100)
         cur_reward_sum = torch.zeros(
+            self.env.num_envs, dtype=torch.float, device=self.device
+        )
+        il_cur_reward_sum = torch.zeros(
             self.env.num_envs, dtype=torch.float, device=self.device
         )
         cur_episode_length = torch.zeros(
@@ -173,10 +178,15 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                         elif "log" in infos:
                             ep_infos.append(infos["log"])
                         cur_reward_sum += rewards
+                        il_cur_reward_sum += il_rewards
+
                         cur_episode_length += 1
                         new_ids = (dones > 0).nonzero(as_tuple=False)
                         rewbuffer.extend(
                             cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist()
+                        )
+                        il_rewbuffer.extend(
+                            il_cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist()
                         )
                         lenbuffer.extend(
                             cur_episode_length[new_ids][:, 0].cpu().numpy().tolist()
@@ -257,7 +267,6 @@ class OnPolicyImitationRunner(OnPolicyRunner):
         self.writer.add_scalar(
             "Loss/surrogate", locs["mean_surrogate_loss"], locs["it"]
         )
-        print(locs["d_loss"])
         self.writer.add_scalar("Loss/d_loss", locs["d_loss"], locs["it"])
         self.writer.add_scalar(
             "Loss/learning_rate", self.alg_il.learning_rate, locs["it"]
@@ -271,6 +280,11 @@ class OnPolicyImitationRunner(OnPolicyRunner):
         if len(locs["rewbuffer"]) > 0:
             self.writer.add_scalar(
                 "Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"]
+            )
+            self.writer.add_scalar(
+                "Train/mean_il_reward",
+                statistics.mean(locs["il_rewbuffer"]),
+                locs["it"],
             )
             self.writer.add_scalar(
                 "Train/mean_episode_length",
@@ -302,6 +316,7 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                 f"""{"Surrogate loss:":>{pad}} {locs["mean_surrogate_loss"]:.4f}\n"""
                 f"""{"Mean action noise std:":>{pad}} {mean_std.item():.2f}\n"""
                 f"""{"Mean reward:":>{pad}} {statistics.mean(locs["rewbuffer"]):.2f}\n"""
+                f"""{"Mean IL reward:":>{pad}} {statistics.mean(locs["il_rewbuffer"]):.2f}\n"""
                 f"""{"Mean episode length:":>{pad}} {statistics.mean(locs["lenbuffer"]):.2f}\n"""
             )
             #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""

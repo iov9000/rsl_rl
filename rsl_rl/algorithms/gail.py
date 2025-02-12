@@ -32,6 +32,7 @@ class GAIL(PPO):
         self.l2_coeff = il_opt.l2_coeff
         self.divergence_type = il_opt.divergence_type
         self.num_irl_epochs = il_opt.num_irl_epochs
+        self.irl_batch_size = il_opt.irl_batch_size
 
         # GAIL components
         self.discriminator = discriminator
@@ -233,33 +234,29 @@ class GAIL(PPO):
 
     def update_discriminator(self):
         demos_generator = self.demos_storage.mini_batch_generator(
-            self.num_mini_batches, self.num_irl_epochs
+            self.irl_batch_size, shuffle=True, flatten=True
         )
-        generator = self.storage.mini_batch_generator(
-            self.num_mini_batches, self.num_learning_epochs
-        )
+        # num_mini_batches = self.demos_storage.get_num_minibatches(self.irl_batch_size)
+        # generator = self.storage.mini_batch_generator(
+        #     num_mini_batches, self.num_irl_epochs, flatten=False
+        # )
         # TODO: make sure all demo transitions are used!!!
         d_loss_avg = 0
         update_cnt = 0
-        for (
-            exp_obs_batch,
-            exp_actions_batch,
-            exp_next_obs_batch,
-            exp_dones_batch,
-        ) in demos_generator:
+
+        for epoch in range(self.num_irl_epochs):
             for (
-                obs_batch,
-                critic_obs_batch,
-                actions_batch,
-                target_values_batch,
-                advantages_batch,
-                returns_batch,
-                old_actions_log_prob_batch,
-                old_mu_batch,
-                old_sigma_batch,
-                hid_states_batch,
-                masks_batch,
-            ) in generator:
+                exp_obs_batch,
+                exp_actions_batch,
+                exp_next_obs_batch,
+                exp_dones_batch,
+            ) in demos_generator:
+                rollout_buffer_batch = self.storage.get_random_batch(
+                    self.irl_batch_size
+                )
+                obs_batch = rollout_buffer_batch[0]
+                actions_batch = rollout_buffer_batch[2]
+
                 d_loss = self.compute_loss(
                     exp_obs_batch, exp_actions_batch, obs_batch, actions_batch
                 )
