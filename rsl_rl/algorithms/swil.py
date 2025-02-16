@@ -10,13 +10,14 @@ import torch.optim as optim
 from rsl_rl.modules import Discriminator
 from rsl_rl.storage import DemoBuffer
 from rsl_rl.algorithms.ppo import PPO
+from rsl_rl.utils import ortho_layer_init
 
 
-class GAIL(PPO):
+class SWIL(PPO):
     discriminator: Discriminator
 
     def __init__(self, actor_critic, discriminator, il_opt, device, **kwargs):
-        # init gail
+        # init swil
         super().__init__(
             actor_critic,
             device=device,
@@ -30,12 +31,14 @@ class GAIL(PPO):
         self.use_weight_norm = il_opt.use_weight_norm
         self.use_spectral_norm = il_opt.use_spectral_norm
         self.l2_coeff = il_opt.l2_coeff
-        self.divergence_type = il_opt.divergence_type
         self.num_irl_epochs = il_opt.num_irl_epochs
         self.irl_batch_size = il_opt.irl_batch_size
-        self.loss_type = il_opt.loss_type
 
-        # GAIL components
+        # SWIL specific arguments
+        self.n_proj = il_opt.n_proj
+        self.use_linear_proj = il_opt.use_linear_proj
+
+        # SWIL components
         self.discriminator = discriminator
         self.discriminator.to(self.device)
 
@@ -169,6 +172,25 @@ class GAIL(PPO):
         mean_surrogate_loss /= num_updates
 
         return mean_value_loss, mean_surrogate_loss
+
+    def proj(self, ob, ac, nob=None, d=None, noise=False, keep_proj=False):
+        # actually use random projections here
+        if self.use_linear_proj:
+            # sample a number of sphere directions
+            if not keep_proj:
+                self.rnd = torch.randn(self.n_proj, self.layer_dims[0])
+            rnd = self.rnd
+            norm_rnd = rnd / torch.norm(rnd, dim=-1, keepdim=True)
+            input_ = self.concatenate_inputs(ob, ac, nob, d)
+            rew = torch.matmul(input_, norm_rnd.T)
+            return rew
+
+        # random NN projections
+        elif self.n_proj > 1 and not self.use_linear_proj:
+            with torch.no_grad():
+                self.discriminator.apply(ortho_layer_init)
+
+        return self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
 
     def compute_loss(
         self,

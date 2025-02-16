@@ -13,7 +13,7 @@ from argparse import Namespace
 from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 
 import rsl_rl
-from rsl_rl.algorithms import GAIL
+from rsl_rl.algorithms import GAIL, SWIL
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import Discriminator
 from rsl_rl.runners.on_policy_runner import OnPolicyRunner
@@ -29,6 +29,12 @@ class OnPolicyImitationRunner(OnPolicyRunner):
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
         self.imitation_cfg = Namespace(**train_cfg["imitation"])
+        if self.imitation_cfg.algo == "SWIL":
+            imitation_class = SWIL
+        else:
+            imitation_class = GAIL
+
+        print(imitation_class)
         self.device = device
         self.env = env
         obs, extras = self.env.get_observations()
@@ -50,7 +56,7 @@ class OnPolicyImitationRunner(OnPolicyRunner):
             n_demos=self.imitation_cfg.n_demos,
         )
 
-        self.alg_il = GAIL(
+        self.alg_il = imitation_class(
             actor_critic=self.alg.actor_critic,
             discriminator=Discriminator(
                 num_disc_obs,

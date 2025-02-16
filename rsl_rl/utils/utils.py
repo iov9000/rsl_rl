@@ -12,6 +12,12 @@ import pickle
 from torch.nn.utils import spectral_norm, weight_norm
 
 
+def ortho_layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+
 def linlayer(in_dim, out_dim, bias=True, wnorm=False, snorm=False):
     # return layer_init(nn.Linear(in_dim, out_dim, bias=bias))
     if wnorm:

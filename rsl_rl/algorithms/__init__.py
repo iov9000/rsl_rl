@@ -5,5 +5,6 @@
 
 from .ppo import PPO
 from .gail import GAIL
+from .swil import SWIL
 
-__all__ = ["PPO", "GAIL"]
+__all__ = ["PPO", "GAIL", "SWIL"]
