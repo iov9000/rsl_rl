@@ -34,7 +34,6 @@ class OnPolicyImitationRunner(OnPolicyRunner):
         else:
             imitation_class = GAIL
 
-        print(imitation_class)
         self.device = device
         self.env = env
         obs, extras = self.env.get_observations()

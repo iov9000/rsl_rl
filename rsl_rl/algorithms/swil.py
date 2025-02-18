@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -33,6 +34,7 @@ class SWIL(PPO):
         self.l2_coeff = il_opt.l2_coeff
         self.num_irl_epochs = il_opt.num_irl_epochs
         self.irl_batch_size = il_opt.irl_batch_size
+        self.shuffle_atom_batches = il_opt.shuffle_atom_batches
 
         # SWIL specific arguments
         self.n_proj = il_opt.n_proj
@@ -192,29 +194,75 @@ class SWIL(PPO):
 
         return self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
 
-    def compute_loss(
+    def gsw_dist_nn(
         self,
-        exp_obs,
-        exp_acs,
-        policy_obs,
-        policy_acs,
-        exp_obs_next=None,
-        exp_dones=None,
+        obs_pi,
+        acs_pi,
+        nobs_pi,
+        d_pi,
+        obs_exp,
+        acs_exp,
+        nobs_exp,
+        d_exp,
+        random=False,
     ):
-        policy_out = self.forward(policy_obs, policy_acs)
-        expert_out = self.forward(exp_obs, exp_acs)
+        """
+        Calculates GSW between two empirical state-action distributions.
+        Note that the number of samples is assumed to be equal
+        (This is however not necessary and could be easily extended
+        for empirical distributions with different number of samples)
+        """
+        if random:
+            with torch.no_grad():
+                self.discriminator.apply(ortho_layer_init)
 
-        d_out = torch.cat([expert_out, policy_out])
+        # project slices
+        pi_slices, _, _, _ = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)
+        exp_slices, _, _, _ = self.proj(obs_exp, acs_exp, nobs_exp, d_exp)
 
-        labels = torch.cat(
-            [torch.zeros(expert_out.size()), torch.ones(policy_out.size())]
-        ).to(self.device)
-        if self.loss_type == "bce":
-            loss = torch.nn.functional.binary_cross_entropy_with_logits(d_out, labels)
-        elif self.loss_type == "ls":
-            loss = torch.sum((expert_out - 1) ** 2 + (policy_out + 1) ** 2)
+        # sort slices
+        pi_slices_sorted, pi_slices_sorted_idx = torch.sort(
+            pi_slices, dim=0, stable=True
+        )
+        exp_slices_sorted, exp_slices_sorted_idx = torch.sort(
+            exp_slices, dim=0, stable=True
+        )
 
-        return loss
+        self.pi_atoms_sorted.append(pi_slices_sorted)
+        self.exp_atoms_sorted.append(exp_slices_sorted)
+        self.pi_atoms_sorted_idx.append(pi_slices_sorted_idx)
+        self.exp_atoms_sorted_idx.append(exp_slices_sorted_idx)
+
+        # TODO: figure out shuffling with torch.randperm to keep everything on GPU
+
+        return torch.sqrt(torch.sum((pi_slices_sorted - exp_slices_sorted) ** 2))
+
+    def compute_loss(self, update_dict):
+        # compute sliced Wasserstein distance here
+        self.policy_obs = copy.deepcopy(update_dict["policy_obs"])
+        self.policy_acs = update_dict["policy_acs"]
+        policy_obs_next = update_dict["policy_obs_next"]
+        policy_dones = update_dict["policy_dones"]
+        self.buffer_empty_cnt = 0
+
+        exp_obs = update_dict["expert_obs"]
+        exp_acs = update_dict["expert_acs"]
+        exp_obs_next = update_dict["expert_obs_next"]
+        exp_dones = update_dict["expert_dones"]
+
+        d_loss = -self.gsw_dist_nn(
+            self.policy_obs,
+            self.policy_acs,
+            policy_obs_next,
+            policy_dones,
+            exp_obs,
+            exp_acs,
+            exp_obs_next,
+            exp_dones,
+            random=False,
+        )
+
+        return d_loss
 
     def concatenate_inputs(self, ob, ac, nob, d):
         input_ = [ob]
@@ -243,28 +291,101 @@ class SWIL(PPO):
         return d_out_div
 
     def get_reward(self, ob, ac, nob=None, d=None):
-        d_out = self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
+        with torch.no_grad():
+            obs_t_slice = self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
+            rew = torch.zeros(1)
 
-        if self.divergence_type == "fkl":
-            d_out_div = torch.exp(d_out)  # (N*T,) p/q TODO: clip
-        elif self.divergence_type == "rkl":
-            d_out_div = d_out  # (N*T,) log (p/q)
-        elif (
-            self.divergence_type == "js"
-        ):  # https://pytorch.org/docs/master/generated/torch.nn.Softplus.html
-            d_out_div = torch.nn.functional.softplus(d_out)  # (N*T,) log (1 + p/q)
+            for p, (sorted_proj, sorted_proj_tgt) in enumerate(
+                zip(self.pi_atoms_sorted, self.exp_atoms_sorted)
+            ):
+                n = len(sorted_proj)
+                if n > 0:
+                    # idx = torch.searchsorted(sorted_proj.T.contiguous(), obs_t_slice.T.contiguous())#, right=True)
+                    # determine slice index in previously sorted atoms used for SWD computation
+                    idx = torch.searchsorted(
+                        sorted_proj.T, obs_t_slice.T
+                    )  # , right=True)
 
-        # XXX: log D vs log(1-D)!!!!
-        if self.loss_type == "bce":
-            self.reward = -torch.squeeze(torch.log(torch.sigmoid(d_out_div) + 1e-8))
-        elif self.loss_type == "ls":
-            self.reward = torch.squeeze(
-                torch.maximum(
-                    torch.zeros_like(d_out_div), 1 - 0.25 * (d_out_div - 1) ** 2
-                )
-            )
+                    print(">> Searchsorted idx shape", idx.shape)
 
-        return self.reward
+                    idx[idx == n] -= 1
+                    # shift extreme indices
+                    w = 1
+
+                    # TODO: what if target CDF is left or mixed?
+                    for j, i in enumerate(idx):
+                        rew_j = 0
+
+                        # calculate diff when replacing atom
+                        a_prev = (sorted_proj_tgt[i, j] - sorted_proj[i, j]) ** 2
+                        a_prev_2 = (
+                            sorted_proj_tgt[i - 1, j] - sorted_proj[i - 1, j]
+                        ) ** 2
+
+                        a_new = (sorted_proj_tgt[i, j] - obs_t_slice[0, j]) ** 2
+                        a_new_2 = (sorted_proj_tgt[i - 1, j] - obs_t_slice[0, j]) ** 2
+
+                        a_i = (sorted_proj_tgt[i, j] - sorted_proj[i, j]) ** 2
+                        a_h = (sorted_proj_tgt[i - 1, j] - sorted_proj[i - 1, j]) ** 2
+                        a_new_i = (sorted_proj_tgt[i, j] - obs_t_slice[0, j]) ** 2
+                        a_new_h = (sorted_proj_tgt[i - 1, j] - obs_t_slice[0, j]) ** 2
+
+                        rew_incr = torch.abs(sorted_proj[i, j] - obs_t_slice[0, j])
+                        rew_decr = torch.abs(sorted_proj[i - 1, j] - obs_t_slice[0, j])
+                        # w = 1/ (n + a_prev) # more reward if closer
+
+                        # print(sorted_proj[i,j] > sorted_proj_tgt[i,j])
+
+                        rew_j = a_new - a_prev
+
+                        if self.repl_loss_type == "diff":
+                            rew_j = a_new - a_prev
+                            rew += w * (rew_j)
+                        elif self.repl_loss_type == "diffmax0":
+                            rew_j = a_new - a_prev
+                            if rew_j > 0:  # > 0 bc we flip it later
+                                rew_j = 0
+                            rew += w * (rew_j)
+                        elif self.repl_loss_type == "diff2":
+                            # if sorted_proj[i,j] > sorted_proj_tgt[i,j]:
+                            # print("api>ae")
+                            if rew_incr > rew_decr:
+                                rew += w * (a_new_h - a_h)
+                                rew_j = a_new_h - a_h
+                            else:
+                                rew += w * (a_new_i - a_i)
+                                rew_j = a_new_i - a_i
+                                # rew += w*(a_new - a_prev)
+                        elif self.repl_loss_type == "diff2max0":
+                            # print(sorted_proj[i,j] > sorted_proj_tgt[i,j])
+                            if rew_incr > rew_decr:
+                                rew_j = a_new_h - a_h
+                            else:
+                                rew_j = a_new_i - a_i
+                            if rew_j > 0:  # > 0 bc we flip it later
+                                rew_j = 0
+                            # XXX: sign problems!!!???
+                            rew += w * (rew_j)
+
+                        elif self.repl_loss_type == "diff3":
+                            if sorted_proj[i, j] > sorted_proj_tgt[i, j]:
+                                rew += w * (a_new - a_prev)
+                            else:
+                                rew -= w * (a_new - a_prev)
+                        else:
+                            if rew_incr > rew_decr:
+                                rew += w * (a_new_h)
+                            else:
+                                rew += w * (a_new_i)
+
+                        ## TODO: hierarchy of multiple batches?
+                else:
+                    self.buffer_empty_cnt += 1
+                    print("Atom buffer empty", self.buffer_empty_cnt)
+                    self.pi_atoms_sorted = copy.deepcopy(self.pi_atoms_sorted_bkp)
+                    self.exp_atoms_sorted = copy.deepcopy(self.exp_atoms_sorted_bkp)
+
+        return rew
 
     def update_discriminator(self):
         demos_generator = self.demos_storage.mini_batch_generator(
