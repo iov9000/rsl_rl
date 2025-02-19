@@ -13,6 +13,7 @@ class RolloutStorage:
     class Transition:
         def __init__(self):
             self.observations = None
+            self.next_observations = None
             self.critic_observations = None
             self.actions = None
             self.rewards = None
@@ -43,6 +44,9 @@ class RolloutStorage:
 
         # Core
         self.observations = torch.zeros(
+            num_transitions_per_env, num_envs, *obs_shape, device=self.device
+        )
+        self.next_observations = torch.zeros(
             num_transitions_per_env, num_envs, *obs_shape, device=self.device
         )
         if privileged_obs_shape[0] is not None:
@@ -101,6 +105,7 @@ class RolloutStorage:
             self.privileged_observations[self.step].copy_(
                 transition.critic_observations
             )
+        self.next_observations[self.step].copy_(transition.next_observations)
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
@@ -185,12 +190,15 @@ class RolloutStorage:
 
     def get_random_batch(self, batch_size, shuffle=True):
         observations = self.observations.flatten(0, 1)
+        next_observations = self.next_observations.flatten(0, 1)
+
         if self.privileged_observations is not None:
             critic_observations = self.privileged_observations.flatten(0, 1)
         else:
             critic_observations = observations
 
         actions = self.actions.flatten(0, 1)
+        dones = self.dones.flatten(0, 1)
         values = self.values.flatten(0, 1)
         returns = self.returns.flatten(0, 1)
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
@@ -206,17 +214,19 @@ class RolloutStorage:
             idx = torch.randint(0, len(observations) - batch_size, (1,)).item()
             indices = torch.arange(idx, idx + batch_size, device=self.device)
 
-        return (
-            observations[indices],
-            critic_observations[indices],
-            actions[indices],
-            values[indices],
-            advantages[indices],
-            returns[indices],
-            old_actions_log_prob[indices],
-            old_mu[indices],
-            old_sigma[indices],
-        )
+        return {
+            "observations": observations[indices],
+            "critic_observations": critic_observations[indices],
+            "next_observations": next_observations[indices],
+            "actions": actions[indices],
+            "values": values[indices],
+            "advantages": advantages[indices],
+            "returns": returns[indices],
+            "old_actions_log_prob": old_actions_log_prob[indices],
+            "mu": old_mu[indices],
+            "sigma": old_sigma[indices],
+            "dones": dones[indices],
+        }
 
     def mini_batch_generator(self, num_mini_batches, num_epochs=8, flatten=True):
         batch_size = self.num_envs * self.num_transitions_per_env
@@ -227,6 +237,7 @@ class RolloutStorage:
 
         if flatten:
             observations = self.observations.flatten(0, 1)
+            next_observations = self.next_observations.flatten(0, 1)
             if self.privileged_observations is not None:
                 critic_observations = self.privileged_observations.flatten(0, 1)
             else:
@@ -239,8 +250,11 @@ class RolloutStorage:
             advantages = self.advantages.flatten(0, 1)
             old_mu = self.mu.flatten(0, 1)
             old_sigma = self.sigma.flatten(0, 1)
+            dones = self.dones.flatten(0, 1)
         else:
             observations = self.observations
+            next_observations = self.next_observations
+
             if self.privileged_observations is not None:
                 critic_observations = self.privileged_observations
             else:
@@ -252,6 +266,7 @@ class RolloutStorage:
             advantages = self.advantages
             old_mu = self.mu
             old_sigma = self.sigma
+            dones = self.dones
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -260,6 +275,8 @@ class RolloutStorage:
                 batch_idx = indices[start:end]
 
                 obs_batch = observations[batch_idx]
+                next_obs_batch = next_observations[batch_idx]
+                dones_batch = dones[batch_idx]
                 critic_observations_batch = critic_observations[batch_idx]
                 actions_batch = actions[batch_idx]
                 target_values_batch = values[batch_idx]
@@ -268,22 +285,21 @@ class RolloutStorage:
                 advantages_batch = advantages[batch_idx]
                 old_mu_batch = old_mu[batch_idx]
                 old_sigma_batch = old_sigma[batch_idx]
-                yield (
-                    obs_batch,
-                    critic_observations_batch,
-                    actions_batch,
-                    target_values_batch,
-                    advantages_batch,
-                    returns_batch,
-                    old_actions_log_prob_batch,
-                    old_mu_batch,
-                    old_sigma_batch,
-                    (
-                        None,
-                        None,
-                    ),
-                    None,
-                )
+                yield {
+                    "observations": obs_batch,
+                    "critic_observations": critic_observations_batch,
+                    "next_observations": next_obs_batch,
+                    "actions": actions_batch,
+                    "values": target_values_batch,
+                    "advantages": advantages_batch,
+                    "returns": returns_batch,
+                    "old_actions_log_prob": old_actions_log_prob_batch,
+                    "mu": old_mu_batch,
+                    "sigma": old_sigma_batch,
+                    "dones": dones_batch,
+                    "hidden_states": (None, None),
+                    "masks": None,
+                }
 
     # for RNNs only
     def recurrent_mini_batch_generator(self, num_mini_batches, num_epochs=8):
@@ -324,6 +340,8 @@ class RolloutStorage:
                 advantages_batch = self.advantages[:, start:stop]
                 values_batch = self.values[:, start:stop]
                 old_actions_log_prob_batch = self.actions_log_prob[:, start:stop]
+                next_obs_batch = self.next_observations[:, start:stop]
+                dones_batch = self.dones[:, start:stop]
 
                 # reshape to [num_envs, time, num layers, hidden dim] (original shape: [time, num_layers, num_envs, hidden_dim])
                 # then take only time steps after dones (flattens num envs and time dimensions),
@@ -349,22 +367,21 @@ class RolloutStorage:
                 hid_a_batch = hid_a_batch[0] if len(hid_a_batch) == 1 else hid_a_batch
                 hid_c_batch = hid_c_batch[0] if len(hid_c_batch) == 1 else hid_c_batch
 
-                yield (
-                    obs_batch,
-                    critic_obs_batch,
-                    actions_batch,
-                    values_batch,
-                    advantages_batch,
-                    returns_batch,
-                    old_actions_log_prob_batch,
-                    old_mu_batch,
-                    old_sigma_batch,
-                    (
-                        hid_a_batch,
-                        hid_c_batch,
-                    ),
-                    masks_batch,
-                )
+                yield {
+                    "observations": obs_batch,
+                    "critic_observations": critic_obs_batch,
+                    "next_observations": next_obs_batch,
+                    "actions": actions_batch,
+                    "values": values_batch,
+                    "advantages": advantages_batch,
+                    "returns": returns_batch,
+                    "old_actions_log_prob": old_actions_log_prob_batch,
+                    "mu": old_mu_batch,
+                    "sigma": old_sigma_batch,
+                    "hidden_states": (hid_a_batch, hid_c_batch),
+                    "masks": masks_batch,
+                    "dones": dones_batch,
+                }
 
                 first_traj = last_traj
 
@@ -403,6 +420,9 @@ class DemoBuffer:
 
     def load_demos(self, demos):
         self.observations = demos["obs"].to(self.device)
+        self.next_observations = torch.cat(
+            (demos["obs"][1:], torch.unsqueeze(demos["obs"][-1], 0)), dim=0
+        )
         self.actions = demos["acs"].to(self.device)
         self.rewards = demos["rew"].to(self.device)
         self.dones = torch.logical_or(demos["term"], demos["trunc"]).to(self.device)

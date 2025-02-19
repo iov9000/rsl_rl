@@ -21,7 +21,7 @@ class PPO:
         num_mini_batches=1,
         clip_param=0.2,
         clip_param_cf=0.1,
-        cf_loss_coef=0.5,
+        cf_loss_coef=0.0,
         gamma=0.998,
         lam=0.95,
         value_loss_coef=1.0,
@@ -39,7 +39,7 @@ class PPO:
         self.schedule = schedule
         self.learning_rate = learning_rate
 
-        # PPO components
+        # PPO components§
         self.actor_critic = actor_critic
         self.actor_critic.to(self.device)
         self.storage = None  # initialized later
@@ -100,9 +100,10 @@ class PPO:
         self.transition.critic_observations = critic_obs
         return self.transition.actions
 
-    def process_env_step(self, rewards, dones, infos):
+    def process_env_step(self, next_obs, rewards, dones, infos):
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
+        self.transition.next_observations = next_obs
         # Bootstrapping on time outs
         if "time_outs" in infos:
             self.transition.rewards += self.gamma * torch.squeeze(
@@ -132,19 +133,19 @@ class PPO:
             generator = self.storage.mini_batch_generator(
                 self.num_mini_batches, self.num_learning_epochs
             )
-        for (
-            obs_batch,
-            critic_obs_batch,
-            actions_batch,
-            target_values_batch,
-            advantages_batch,
-            returns_batch,
-            old_actions_log_prob_batch,
-            old_mu_batch,
-            old_sigma_batch,
-            hid_states_batch,
-            masks_batch,
-        ) in generator:
+        for batch in generator:
+            obs_batch = batch["observations"]
+            critic_obs_batch = batch["critic_observations"]
+            actions_batch = batch["actions"]
+            old_actions_log_prob_batch = batch["actions_log_prob"]
+            returns_batch = batch["returns"]
+            advantages_batch = batch["advantages"]
+            masks_batch = batch["masks"]
+            hid_states_batch = batch["hidden_states"]
+            target_values_batch = batch["values"]
+            old_sigma_batch = batch["sigma"]
+            old_mu_batch = batch["mu"]
+
             self.actor_critic.act(
                 obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0]
             )

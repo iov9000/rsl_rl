@@ -172,7 +172,7 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                     il_rewards = self.alg_il.get_reward(obs, actions, next_obs, dones)
 
                     # process the step (add transition to rollout buffer)
-                    self.alg_il.process_env_step(il_rewards, dones, infos)
+                    self.alg_il.process_env_step(next_obs, il_rewards, dones, infos)
 
                     if self.log_dir is not None:
                         # Book keeping

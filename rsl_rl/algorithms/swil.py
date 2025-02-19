@@ -13,6 +13,8 @@ from rsl_rl.storage import DemoBuffer
 from rsl_rl.algorithms.ppo import PPO
 from rsl_rl.utils import ortho_layer_init
 
+from collections import deque
+
 
 class SWIL(PPO):
     discriminator: Discriminator
@@ -35,6 +37,7 @@ class SWIL(PPO):
         self.num_irl_epochs = il_opt.num_irl_epochs
         self.irl_batch_size = il_opt.irl_batch_size
         self.shuffle_atom_batches = il_opt.shuffle_atom_batches
+        self.max_q_len = il_opt.max_q_len
 
         # SWIL specific arguments
         self.n_proj = il_opt.n_proj
@@ -47,6 +50,10 @@ class SWIL(PPO):
         self.optimizer_d = optim.Adam(
             self.discriminator.parameters(), lr=self.il_lr, weight_decay=self.l2_coeff
         )
+        self.pi_atoms_sorted = deque(maxlen=self.max_q_len)
+        self.pi_atoms_sorted_idx = deque(maxlen=self.max_q_len)
+        self.exp_atoms_sorted = deque(maxlen=self.max_q_len)
+        self.exp_atoms_sorted_idx = deque(maxlen=self.max_q_len)
 
     def init_storage_from_demos(
         self,
@@ -84,19 +91,19 @@ class SWIL(PPO):
             generator = self.storage.mini_batch_generator(
                 self.num_mini_batches, self.num_learning_epochs
             )
-        for (
-            obs_batch,
-            critic_obs_batch,
-            actions_batch,
-            target_values_batch,
-            advantages_batch,
-            returns_batch,
-            old_actions_log_prob_batch,
-            old_mu_batch,
-            old_sigma_batch,
-            hid_states_batch,
-            masks_batch,
-        ) in generator:
+        for batch in generator:
+            obs_batch = batch["observations"]
+            critic_obs_batch = batch["critic_observations"]
+            actions_batch = batch["actions"]
+            old_actions_log_prob_batch = batch["old_actions_log_prob"]
+            returns_batch = batch["returns"]
+            advantages_batch = batch["advantages"]
+            masks_batch = batch["masks"]
+            hid_states_batch = batch["hidden_states"]
+            target_values_batch = batch["values"]
+            old_sigma_batch = batch["sigma"]
+            old_mu_batch = batch["mu"]
+
             self.actor_critic.act(
                 obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0]
             )
@@ -237,29 +244,32 @@ class SWIL(PPO):
 
         return torch.sqrt(torch.sum((pi_slices_sorted - exp_slices_sorted) ** 2))
 
-    def compute_loss(self, update_dict):
+    def compute_loss(
+        self,
+        exp_obs,
+        exp_acs,
+        pi_obs,
+        pi_acs,
+        exp_nobs=None,
+        exp_dones=None,
+        pi_nobs=None,
+        pi_dones=None,
+    ):
         # compute sliced Wasserstein distance here
-        self.policy_obs = copy.deepcopy(update_dict["policy_obs"])
-        self.policy_acs = update_dict["policy_acs"]
-        policy_obs_next = update_dict["policy_obs_next"]
-        policy_dones = update_dict["policy_dones"]
-        self.buffer_empty_cnt = 0
+        self.policy_obs = copy.deepcopy(pi_obs)
+        self.policy_acs = copy.deepcopy(pi_acs)
 
-        exp_obs = update_dict["expert_obs"]
-        exp_acs = update_dict["expert_acs"]
-        exp_obs_next = update_dict["expert_obs_next"]
-        exp_dones = update_dict["expert_dones"]
+        self.buffer_empty_cnt = 0
 
         d_loss = -self.gsw_dist_nn(
             self.policy_obs,
             self.policy_acs,
-            policy_obs_next,
-            policy_dones,
+            pi_nobs,
+            pi_dones,
             exp_obs,
             exp_acs,
-            exp_obs_next,
+            exp_nobs,
             exp_dones,
-            random=False,
         )
 
         return d_loss
@@ -292,8 +302,9 @@ class SWIL(PPO):
 
     def get_reward(self, ob, ac, nob=None, d=None):
         with torch.no_grad():
+            num_envs = ob.shape[0]
             obs_t_slice = self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
-            rew = torch.zeros(1)
+            rew = torch.zeros(num_envs, device=self.device)
 
             for p, (sorted_proj, sorted_proj_tgt) in enumerate(
                 zip(self.pi_atoms_sorted, self.exp_atoms_sorted)
@@ -407,11 +418,18 @@ class SWIL(PPO):
                 exp_dones_batch,
             ) in demos_generator:
                 rollout_buffer_batch = self.storage.get_random_batch(len(exp_obs_batch))
-                obs_batch = rollout_buffer_batch[0]
-                actions_batch = rollout_buffer_batch[2]
+                obs_batch = rollout_buffer_batch["observations"]
+                actions_batch = rollout_buffer_batch["actions"]
+                next_obs_batch = rollout_buffer_batch["next_observations"]
+                dones_batch = rollout_buffer_batch["dones"]
 
                 d_loss = self.compute_loss(
-                    exp_obs_batch, exp_actions_batch, obs_batch, actions_batch
+                    exp_obs_batch,
+                    exp_actions_batch,
+                    exp_next_obs_batch,
+                    exp_dones_batch,
+                    obs_batch,
+                    actions_batch,
                 )
                 d_loss_avg += d_loss.item()
                 update_cnt += 1
