@@ -38,6 +38,7 @@ class SWIL(PPO):
         self.irl_batch_size = il_opt.irl_batch_size
         self.shuffle_atom_batches = il_opt.shuffle_atom_batches
         self.max_q_len = il_opt.max_q_len
+        self.repl_loss_type = il_opt.repl_loss_type
 
         # SWIL specific arguments
         self.n_proj = il_opt.n_proj
@@ -224,8 +225,8 @@ class SWIL(PPO):
                 self.discriminator.apply(ortho_layer_init)
 
         # project slices
-        pi_slices, _, _, _ = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)
-        exp_slices, _, _, _ = self.proj(obs_exp, acs_exp, nobs_exp, d_exp)
+        pi_slices = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)
+        exp_slices = self.proj(obs_exp, acs_exp, nobs_exp, d_exp)
 
         # sort slices
         pi_slices_sorted, pi_slices_sorted_idx = torch.sort(
@@ -262,8 +263,8 @@ class SWIL(PPO):
         self.buffer_empty_cnt = 0
 
         d_loss = -self.gsw_dist_nn(
-            self.policy_obs,
-            self.policy_acs,
+            pi_obs,
+            pi_acs,
             pi_nobs,
             pi_dones,
             exp_obs,
@@ -316,8 +317,6 @@ class SWIL(PPO):
                     idx = torch.searchsorted(
                         sorted_proj.T, obs_t_slice.T
                     )  # , right=True)
-
-                    print(">> Searchsorted idx shape", idx.shape)
 
                     idx[idx == n] -= 1
                     # shift extreme indices
@@ -424,12 +423,14 @@ class SWIL(PPO):
                 dones_batch = rollout_buffer_batch["dones"]
 
                 d_loss = self.compute_loss(
-                    exp_obs_batch,
-                    exp_actions_batch,
-                    exp_next_obs_batch,
-                    exp_dones_batch,
-                    obs_batch,
-                    actions_batch,
+                    exp_obs=exp_obs_batch,
+                    exp_acs=exp_actions_batch,
+                    pi_obs=obs_batch,
+                    pi_acs=actions_batch,
+                    exp_nobs=exp_next_obs_batch,
+                    exp_dones=exp_dones_batch,
+                    pi_nobs=next_obs_batch,
+                    pi_dones=dones_batch,
                 )
                 d_loss_avg += d_loss.item()
                 update_cnt += 1
