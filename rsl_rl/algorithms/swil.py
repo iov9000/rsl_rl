@@ -322,7 +322,7 @@ class SWIL(PPO):
                     # shift extreme indices
                     w = 1
 
-                    # TODO: what if target CDF is left or mixed?
+                    # TODO: what if target CDF is left or mixed with source CDF?
                     for j, i in enumerate(idx):
                         rew_j = 0
 
@@ -342,11 +342,6 @@ class SWIL(PPO):
 
                         rew_incr = torch.abs(sorted_proj[i, j] - obs_t_slice[0, j])
                         rew_decr = torch.abs(sorted_proj[i - 1, j] - obs_t_slice[0, j])
-                        # w = 1/ (n + a_prev) # more reward if closer
-
-                        # print(sorted_proj[i,j] > sorted_proj_tgt[i,j])
-
-                        rew_j = a_new - a_prev
 
                         if self.repl_loss_type == "diff":
                             rew_j = a_new - a_prev
@@ -357,17 +352,11 @@ class SWIL(PPO):
                                 rew_j = 0
                             rew += w * (rew_j)
                         elif self.repl_loss_type == "diff2":
-                            # if sorted_proj[i,j] > sorted_proj_tgt[i,j]:
-                            # print("api>ae")
-                            if rew_incr > rew_decr:
-                                rew += w * (a_new_h - a_h)
-                                rew_j = a_new_h - a_h
-                            else:
-                                rew += w * (a_new_i - a_i)
-                                rew_j = a_new_i - a_i
-                                # rew += w*(a_new - a_prev)
+                            diff_h = a_new_h - a_h
+                            diff_i = a_new_i - a_i
+                            rew_j = torch.where(rew_incr > rew_decr, diff_h, diff_i)
+                            rew += w * (rew_j)
                         elif self.repl_loss_type == "diff2max0":
-                            # print(sorted_proj[i,j] > sorted_proj_tgt[i,j])
                             if rew_incr > rew_decr:
                                 rew_j = a_new_h - a_h
                             else:
@@ -378,18 +367,18 @@ class SWIL(PPO):
                             rew += w * (rew_j)
 
                         elif self.repl_loss_type == "diff3":
+                            rew_j = a_new - a_prev
                             if sorted_proj[i, j] > sorted_proj_tgt[i, j]:
-                                rew += w * (a_new - a_prev)
+                                rew += w * rew_j
                             else:
-                                rew -= w * (a_new - a_prev)
+                                rew -= w * rew_j
                         else:
                             if rew_incr > rew_decr:
                                 rew += w * (a_new_h)
                             else:
                                 rew += w * (a_new_i)
-
-                        ## TODO: hierarchy of multiple batches?
                 else:
+                    # TODO: hierarchy of multiple batches?
                     self.buffer_empty_cnt += 1
                     print("Atom buffer empty", self.buffer_empty_cnt)
                     self.pi_atoms_sorted = copy.deepcopy(self.pi_atoms_sorted_bkp)
