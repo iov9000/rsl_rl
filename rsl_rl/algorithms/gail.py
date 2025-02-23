@@ -268,7 +268,7 @@ class GAIL(PPO):
                 # since we have much more rollout data, sample a random batch
                 # TODO: think of ways to be more efficient here -> e.g. some smart sampling strategy
                 rollout_buffer_batch = self.storage.get_random_batch(
-                    len(exp_obs_batch), flatten=False
+                    len(exp_obs_batch), flatten=True
                 )
 
                 obs_batch = rollout_buffer_batch["observations"]
