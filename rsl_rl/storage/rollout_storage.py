@@ -188,23 +188,40 @@ class RolloutStorage:
         trajectory_lengths = done_indices[1:] - done_indices[:-1]
         return trajectory_lengths.float().mean(), self.rewards.mean()
 
-    def get_random_batch(self, batch_size, shuffle=True):
-        observations = self.observations.flatten(0, 1)
-        next_observations = self.next_observations.flatten(0, 1)
+    def get_random_batch(self, batch_size, shuffle=True, flatten=True):
+        if flatten:
+            observations = self.observations.flatten(0, 1)
+            next_observations = self.next_observations.flatten(0, 1)
 
-        if self.privileged_observations is not None:
-            critic_observations = self.privileged_observations.flatten(0, 1)
+            if self.privileged_observations is not None:
+                critic_observations = self.privileged_observations.flatten(0, 1)
+            else:
+                critic_observations = observations
+
+            actions = self.actions.flatten(0, 1)
+            dones = self.dones.flatten(0, 1)
+            values = self.values.flatten(0, 1)
+            returns = self.returns.flatten(0, 1)
+            old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
+            advantages = self.advantages.flatten(0, 1)
+            old_mu = self.mu.flatten(0, 1)
+            old_sigma = self.sigma.flatten(0, 1)
         else:
-            critic_observations = observations
+            observations = self.observations
+            next_observations = self.next_observations
 
-        actions = self.actions.flatten(0, 1)
-        dones = self.dones.flatten(0, 1)
-        values = self.values.flatten(0, 1)
-        returns = self.returns.flatten(0, 1)
-        old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
-        advantages = self.advantages.flatten(0, 1)
-        old_mu = self.mu.flatten(0, 1)
-        old_sigma = self.sigma.flatten(0, 1)
+            if self.privileged_observations is not None:
+                critic_observations = self.privileged_observations
+            else:
+                critic_observations = observations
+            actions = self.actions
+            dones = self.dones
+            values = self.values
+            returns = self.returns
+            old_actions_log_prob = self.actions_log_prob
+            advantages = self.advantages
+            old_mu = self.mu
+            old_sigma = self.sigma
 
         if shuffle:
             indices = torch.randint(
@@ -419,6 +436,8 @@ class DemoBuffer:
         self.step = 0
 
     def load_demos(self, demos):
+        self.num_demo_envs = demos["obs"].shape[1]
+
         self.observations = demos["obs"].to(self.device)
         self.next_observations = torch.cat(
             (demos["obs"][1:], torch.unsqueeze(demos["obs"][-1], 0)), dim=0
@@ -426,8 +445,6 @@ class DemoBuffer:
         self.actions = demos["acs"].to(self.device)
         self.rewards = demos["rew"].to(self.device)
         self.dones = torch.logical_or(demos["term"], demos["trunc"]).to(self.device)
-
-        self.num_demo_envs = demos["obs"].shape[1]
 
         # self.observations = (
         #     demos["obs"][:, 0, :]
@@ -468,11 +485,13 @@ class DemoBuffer:
     def mini_batch_generator(self, batch_size, shuffle=False, flatten=True):
         if flatten:
             observations = self.observations.flatten(0, 1)
+            next_observations = self.next_observations.flatten(0, 1)
             actions = self.actions.flatten(0, 1)
             rewards = self.rewards.flatten(0, 1)
             dones = self.dones.flatten(0, 1)
         else:
             observations = self.observations
+            next_observations = self.next_observations
             actions = self.actions
             rewards = self.rewards
             dones = self.dones
@@ -480,23 +499,32 @@ class DemoBuffer:
         buffer_size = len(self.observations)
 
         if shuffle:
-            indices = torch.randperm(buffer_size, device=self.device)
+            indices = torch.randperm(buffer_size - 1, device=self.device)
         else:
-            indices = torch.arange(buffer_size, device=self.device)
+            indices = torch.arange(buffer_size - 1, device=self.device)
 
         for i in range(batch_size, buffer_size - 1, batch_size):
             start = i
             end = i + batch_size
             batch_idx = indices[start:end]
 
-            obs_batch = observations[batch_idx]
-            actions_batch = actions[batch_idx]
-            rewards_batch = rewards[batch_idx]
-            dones_batch = dones[batch_idx]
+            if flatten:
+                obs_batch = observations[batch_idx]
+                next_obs_batch = next_observations[batch_idx]
+                actions_batch = actions[batch_idx]
+                rewards_batch = rewards[batch_idx]
+                dones_batch = dones[batch_idx]
+            else:
+                obs_batch = observations[batch_idx, 0, :]
+                next_obs_batch = next_observations[batch_idx, 0, :]
+                actions_batch = actions[batch_idx, 0, :]
+                rewards_batch = rewards[batch_idx, 0, :]
+                dones_batch = dones[batch_idx, 0, :]
 
-            yield (
-                obs_batch,
-                actions_batch,
-                rewards_batch,
-                dones_batch,
-            )
+            yield {
+                "observations": obs_batch,
+                "next_observations": next_obs_batch,
+                "actions": actions_batch,
+                "rewards": rewards_batch,
+                "dones": dones_batch,
+            }

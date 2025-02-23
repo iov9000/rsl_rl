@@ -79,19 +79,19 @@ class GAIL(PPO):
             generator = self.storage.mini_batch_generator(
                 self.num_mini_batches, self.num_learning_epochs
             )
-        for (
-            obs_batch,
-            critic_obs_batch,
-            actions_batch,
-            target_values_batch,
-            advantages_batch,
-            returns_batch,
-            old_actions_log_prob_batch,
-            old_mu_batch,
-            old_sigma_batch,
-            hid_states_batch,
-            masks_batch,
-        ) in generator:
+        for batch in generator:
+            obs_batch = batch["observations"]
+            critic_obs_batch = batch["critic_observations"]
+            actions_batch = batch["actions"]
+            old_actions_log_prob_batch = batch["old_actions_log_prob"]
+            returns_batch = batch["returns"]
+            advantages_batch = batch["advantages"]
+            masks_batch = batch["masks"]
+            hid_states_batch = batch["hidden_states"]
+            target_values_batch = batch["values"]
+            old_sigma_batch = batch["sigma"]
+            old_mu_batch = batch["mu"]
+
             self.actor_critic.act(
                 obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0]
             )
@@ -174,13 +174,15 @@ class GAIL(PPO):
         self,
         exp_obs,
         exp_acs,
-        policy_obs,
-        policy_acs,
-        exp_obs_next=None,
+        pi_obs,
+        pi_acs,
+        exp_nobs=None,
         exp_dones=None,
+        pi_nobs=None,
+        pi_dones=None,
     ):
-        policy_out = self.forward(policy_obs, policy_acs)
-        expert_out = self.forward(exp_obs, exp_acs)
+        policy_out = self.forward(pi_obs, pi_acs, pi_nobs, pi_dones)
+        expert_out = self.forward(exp_obs, exp_acs, exp_nobs, exp_dones)
 
         d_out = torch.cat([expert_out, policy_out])
 
@@ -257,18 +259,32 @@ class GAIL(PPO):
         update_cnt = 0
 
         for epoch in range(self.num_irl_epochs):
-            for (
-                exp_obs_batch,
-                exp_actions_batch,
-                exp_next_obs_batch,
-                exp_dones_batch,
-            ) in demos_generator:
-                rollout_buffer_batch = self.storage.get_random_batch(len(exp_obs_batch))
-                obs_batch = rollout_buffer_batch[0]
-                actions_batch = rollout_buffer_batch[2]
+            for demo_buffer_batch in demos_generator:
+                exp_obs_batch = demo_buffer_batch["observations"]
+                exp_actions_batch = demo_buffer_batch["actions"]
+                exp_next_obs_batch = demo_buffer_batch["next_observations"]
+                exp_dones_batch = demo_buffer_batch["dones"]
+
+                # since we have much more rollout data, sample a random batch
+                # TODO: think of ways to be more efficient here -> e.g. some smart sampling strategy
+                rollout_buffer_batch = self.storage.get_random_batch(
+                    len(exp_obs_batch), flatten=False
+                )
+
+                obs_batch = rollout_buffer_batch["observations"]
+                actions_batch = rollout_buffer_batch["actions"]
+                next_obs_batch = rollout_buffer_batch["next_observations"]
+                dones_batch = rollout_buffer_batch["dones"]
 
                 d_loss = self.compute_loss(
-                    exp_obs_batch, exp_actions_batch, obs_batch, actions_batch
+                    exp_obs=exp_obs_batch,
+                    exp_acs=exp_actions_batch,
+                    pi_obs=obs_batch,
+                    pi_acs=actions_batch,
+                    exp_nobs=exp_next_obs_batch,
+                    exp_dones=exp_dones_batch,
+                    pi_nobs=next_obs_batch,
+                    pi_dones=dones_batch,
                 )
                 d_loss_avg += d_loss.item()
                 update_cnt += 1

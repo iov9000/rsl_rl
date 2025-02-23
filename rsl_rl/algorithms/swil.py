@@ -1,6 +1,3 @@
-#  Copyright 2021 ETH Zurich, NVIDIA CORPORATION
-#  SPDX-License-Identifier: BSD-3-Clause
-
 from __future__ import annotations
 
 import copy
@@ -52,9 +49,7 @@ class SWIL(PPO):
             self.discriminator.parameters(), lr=self.il_lr, weight_decay=self.l2_coeff
         )
         self.pi_atoms_sorted = deque(maxlen=self.max_q_len)
-        self.pi_atoms_sorted_idx = deque(maxlen=self.max_q_len)
         self.exp_atoms_sorted = deque(maxlen=self.max_q_len)
-        self.exp_atoms_sorted_idx = deque(maxlen=self.max_q_len)
 
     def init_storage_from_demos(
         self,
@@ -226,7 +221,7 @@ class SWIL(PPO):
 
         # project slices
         pi_slices = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)
-        exp_slices = self.proj(obs_exp, acs_exp, nobs_exp, d_exp)
+        exp_slices = self.proj(obs_exp, acs_exp, nobs_exp, d_exp).unsqueeze(1)
 
         # sort slices
         pi_slices_sorted, pi_slices_sorted_idx = torch.sort(
@@ -238,8 +233,6 @@ class SWIL(PPO):
 
         self.pi_atoms_sorted.append(pi_slices_sorted)
         self.exp_atoms_sorted.append(exp_slices_sorted)
-        self.pi_atoms_sorted_idx.append(pi_slices_sorted_idx)
-        self.exp_atoms_sorted_idx.append(exp_slices_sorted_idx)
 
         # TODO: figure out shuffling with torch.randperm to keep everything on GPU
 
@@ -307,88 +300,127 @@ class SWIL(PPO):
             obs_t_slice = self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
             rew = torch.zeros(num_envs, device=self.device)
 
-            for p, (sorted_proj, sorted_proj_tgt) in enumerate(
-                zip(self.pi_atoms_sorted, self.exp_atoms_sorted)
-            ):
+            if len(self.pi_atoms_sorted) > 0:
+                # sample random sorted atom batch from queues
+                idx_ = torch.randint(0, high=len(self.pi_atoms_sorted), size=())
+                idx__ = torch.randint(0, high=len(self.exp_atoms_sorted), size=())
+
+                sorted_proj = self.pi_atoms_sorted[idx_]
+                sorted_proj_tgt = self.exp_atoms_sorted[idx__]
+
+                # TODO: figure out rewards based on multiple batches
+                # -> some sort of hierarchy? OT approaches?
+                # for _, (sorted_proj, sorted_proj_tgt) in enumerate(
+                #     zip(pi_atoms_sorted, exp_atoms_sorted)
+                # ):
                 n = len(sorted_proj)
-                if n > 0:
-                    # idx = torch.searchsorted(sorted_proj.T.contiguous(), obs_t_slice.T.contiguous())#, right=True)
-                    # determine slice index in previously sorted atoms used for SWD computation
-                    idx = torch.searchsorted(
-                        sorted_proj.T, obs_t_slice.T
-                    )  # , right=True)
+                # determine slice index in previously sorted atoms used for SWD computation
+                idx = torch.searchsorted(
+                    torch.transpose(sorted_proj, 0, -1), obs_t_slice.unsqueeze(0)
+                ).squeeze()  # , right=True)
 
-                    idx[idx == n] -= 1
-                    # shift extreme indices
-                    w = 1
+                idx[idx == n] -= 1
+                idx[torch.where(idx == -1)] += 1
 
-                    # TODO: what if target CDF is left or mixed with source CDF?
-                    for j, i in enumerate(idx):
+                # shift extreme indices
+                w = 1
+
+                if self.repl_loss_type == "diff":
+                    a_prev = (
+                        sorted_proj_tgt[idx.long()] - sorted_proj[idx.long()]
+                    ) ** 2
+                    a_new = (sorted_proj_tgt[idx.long()] - obs_t_slice) ** 2
+                    rew_j = a_new - a_prev
+                elif self.repl_loss_type == "diffmax0":
+                    a_prev = (
+                        sorted_proj_tgt[idx.long()] - sorted_proj[idx.long()]
+                    ) ** 2
+                    a_new = (sorted_proj_tgt[idx.long()] - obs_t_slice) ** 2
+                    a_new[a_new > 0] = 0
+                    rew_j = a_new - a_prev
+                    if rew_j > 0:
                         rew_j = 0
+                elif self.repl_loss_type == "diff2":
+                    idx_i = idx.long()
+                    idx_h = (idx.long() - 1).clamp_(0, None)
 
-                        # calculate diff when replacing atom
-                        a_prev = (sorted_proj_tgt[i, j] - sorted_proj[i, j]) ** 2
-                        a_prev_2 = (
-                            sorted_proj_tgt[i - 1, j] - sorted_proj[i - 1, j]
-                        ) ** 2
+                    sorted_proj_tgt_i = sorted_proj_tgt[idx_i].squeeze()
+                    sorted_proj_tgt_h = sorted_proj_tgt[idx_h].squeeze()
+                    sorted_proj_i = torch.gather(
+                        sorted_proj, 0, idx_i.view(1, sorted_proj.shape[1], 1)
+                    ).squeeze()
+                    sorted_proj_h = torch.gather(
+                        sorted_proj,
+                        0,
+                        idx_h.view(1, sorted_proj.shape[1], 1),
+                    ).squeeze()
 
-                        a_new = (sorted_proj_tgt[i, j] - obs_t_slice[0, j]) ** 2
-                        a_new_2 = (sorted_proj_tgt[i - 1, j] - obs_t_slice[0, j]) ** 2
+                    obs_t_slice = obs_t_slice.squeeze()
 
-                        a_i = (sorted_proj_tgt[i, j] - sorted_proj[i, j]) ** 2
-                        a_h = (sorted_proj_tgt[i - 1, j] - sorted_proj[i - 1, j]) ** 2
-                        a_new_i = (sorted_proj_tgt[i, j] - obs_t_slice[0, j]) ** 2
-                        a_new_h = (sorted_proj_tgt[i - 1, j] - obs_t_slice[0, j]) ** 2
+                    a_i = (sorted_proj_tgt_i - sorted_proj_i) ** 2
+                    a_h = (sorted_proj_tgt_h - sorted_proj_h) ** 2
+                    a_new_i = (sorted_proj_tgt_i - obs_t_slice) ** 2
+                    a_new_h = (sorted_proj_tgt_h - obs_t_slice) ** 2
+                    diff_h = a_new_h - a_h
+                    diff_i = a_new_i - a_i
+                    rew = torch.where(diff_i > diff_h, diff_h, diff_i)
 
-                        rew_incr = torch.abs(sorted_proj[i, j] - obs_t_slice[0, j])
-                        rew_decr = torch.abs(sorted_proj[i - 1, j] - obs_t_slice[0, j])
+                # TODO: what if target CDF is left or mixed with source CDF?
+                # for j, i in enumerate(idx):
+                #     rew_j = 0
 
-                        if self.repl_loss_type == "diff":
-                            rew_j = a_new - a_prev
-                            rew += w * (rew_j)
-                        elif self.repl_loss_type == "diffmax0":
-                            rew_j = a_new - a_prev
-                            if rew_j > 0:  # > 0 bc we flip it later
-                                rew_j = 0
-                            rew += w * (rew_j)
-                        elif self.repl_loss_type == "diff2":
-                            diff_h = a_new_h - a_h
-                            diff_i = a_new_i - a_i
-                            rew_j = torch.where(rew_incr > rew_decr, diff_h, diff_i)
-                            rew += w * (rew_j)
-                        elif self.repl_loss_type == "diff2max0":
-                            if rew_incr > rew_decr:
-                                rew_j = a_new_h - a_h
-                            else:
-                                rew_j = a_new_i - a_i
-                            if rew_j > 0:  # > 0 bc we flip it later
-                                rew_j = 0
-                            # XXX: sign problems!!!???
-                            rew += w * (rew_j)
+                #     # calculate diff when replacing atom
+                #     a_prev = (sorted_proj_tgt[i, j] - sorted_proj[i, j]) ** 2
+                #     a_new = (sorted_proj_tgt[i, j] - obs_t_slice[0, j]) ** 2
 
-                        elif self.repl_loss_type == "diff3":
-                            rew_j = a_new - a_prev
-                            if sorted_proj[i, j] > sorted_proj_tgt[i, j]:
-                                rew += w * rew_j
-                            else:
-                                rew -= w * rew_j
-                        else:
-                            if rew_incr > rew_decr:
-                                rew += w * (a_new_h)
-                            else:
-                                rew += w * (a_new_i)
-                else:
-                    # TODO: hierarchy of multiple batches?
-                    self.buffer_empty_cnt += 1
-                    print("Atom buffer empty", self.buffer_empty_cnt)
-                    self.pi_atoms_sorted = copy.deepcopy(self.pi_atoms_sorted_bkp)
-                    self.exp_atoms_sorted = copy.deepcopy(self.exp_atoms_sorted_bkp)
+                #     a_i = (sorted_proj_tgt[i, j] - sorted_proj[i, j]) ** 2
+                #     a_h = (sorted_proj_tgt[i - 1, j] - sorted_proj[i - 1, j]) ** 2
+                #     a_new_i = (sorted_proj_tgt[i, j] - obs_t_slice[0, j]) ** 2
+                #     a_new_h = (sorted_proj_tgt[i - 1, j] - obs_t_slice[0, j]) ** 2
+
+                #     rew_incr = torch.abs(sorted_proj[i, j] - obs_t_slice[0, j])
+                #     rew_decr = torch.abs(sorted_proj[i - 1, j] - obs_t_slice[0, j])
+
+                #     if self.repl_loss_type == "diff":
+                #         rew_j = a_new - a_prev
+                #         rew += w * (rew_j)
+                #     elif self.repl_loss_type == "diffmax0":
+                #         rew_j = a_new - a_prev
+                #         if rew_j > 0:  # > 0 bc we flip it later
+                #             rew_j = 0
+                #         rew += w * (rew_j)
+                #     elif self.repl_loss_type == "diff2":
+                #         diff_h = a_new_h - a_h
+                #         diff_i = a_new_i - a_i
+                #         rew_j = torch.where(rew_incr > rew_decr, diff_h, diff_i)
+                #         rew += w * (rew_j)
+                #     elif self.repl_loss_type == "diff2max0":
+                #         if rew_incr > rew_decr:
+                #             rew_j = a_new_h - a_h
+                #         else:
+                #             rew_j = a_new_i - a_i
+                #         if rew_j > 0:  # > 0 bc we flip it later
+                #             rew_j = 0
+                #         # XXX: sign problems!!!???
+                #         rew += w * (rew_j)
+
+                #     elif self.repl_loss_type == "diff3":
+                #         rew_j = a_new - a_prev
+                #         if sorted_proj[i, j] > sorted_proj_tgt[i, j]:
+                #             rew += w * rew_j
+                #         else:
+                #             rew -= w * rew_j
+                #     else:
+                #         if rew_incr > rew_decr:
+                #             rew += w * (a_new_h)
+                #         else:
+                #             rew += w * (a_new_i)
 
         return rew
 
     def update_discriminator(self):
         demos_generator = self.demos_storage.mini_batch_generator(
-            self.irl_batch_size, shuffle=True, flatten=True
+            self.irl_batch_size, shuffle=True, flatten=False
         )
         # num_mini_batches = self.demos_storage.get_num_minibatches(self.irl_batch_size)
         # generator = self.storage.mini_batch_generator(
@@ -399,13 +431,18 @@ class SWIL(PPO):
         update_cnt = 0
 
         for epoch in range(self.num_irl_epochs):
-            for (
-                exp_obs_batch,
-                exp_actions_batch,
-                exp_next_obs_batch,
-                exp_dones_batch,
-            ) in demos_generator:
-                rollout_buffer_batch = self.storage.get_random_batch(len(exp_obs_batch))
+            for demo_buffer_batch in demos_generator:
+                exp_obs_batch = demo_buffer_batch["observations"]
+                exp_actions_batch = demo_buffer_batch["actions"]
+                exp_next_obs_batch = demo_buffer_batch["next_observations"]
+                exp_dones_batch = demo_buffer_batch["dones"]
+
+                # since we have much more rollout data, sample a random batch
+                # TODO: think of ways to be more efficient here -> e.g. some smart sampling strategy
+                rollout_buffer_batch = self.storage.get_random_batch(
+                    len(exp_obs_batch), flatten=False
+                )
+
                 obs_batch = rollout_buffer_batch["observations"]
                 actions_batch = rollout_buffer_batch["actions"]
                 next_obs_batch = rollout_buffer_batch["next_observations"]
