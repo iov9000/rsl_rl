@@ -174,6 +174,9 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                     # process the step (add transition to rollout buffer)
                     self.alg_il.process_env_step(next_obs, il_rewards, dones, infos)
 
+                    # update obs
+                    obs = next_obs
+
                     if self.log_dir is not None:
                         # Book keeping
                         # note: we changed logging to use "log" instead of "episode" to avoid confusion with

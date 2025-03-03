@@ -137,7 +137,7 @@ class PPO:
             obs_batch = batch["observations"]
             critic_obs_batch = batch["critic_observations"]
             actions_batch = batch["actions"]
-            old_actions_log_prob_batch = batch["actions_log_prob"]
+            old_actions_log_prob_batch = batch["old_actions_log_prob"]
             returns_batch = batch["returns"]
             advantages_batch = batch["advantages"]
             masks_batch = batch["masks"]
