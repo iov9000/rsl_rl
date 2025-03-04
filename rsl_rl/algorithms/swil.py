@@ -183,12 +183,14 @@ class SWIL(PPO):
         if self.use_linear_proj:
             # sample a number of sphere directions
             if not keep_proj:
-                self.rnd = torch.randn(self.n_proj, self.layer_dims[0])
+                self.rnd = torch.randn(self.n_proj, self.discriminator.input_dim).to(
+                    self.device
+                )
             rnd = self.rnd
             norm_rnd = rnd / torch.norm(rnd, dim=-1, keepdim=True)
             input_ = self.concatenate_inputs(ob, ac, nob, d)
-            rew = torch.matmul(input_, norm_rnd.T)
-            return rew
+            prj = torch.matmul(input_, norm_rnd.T)
+            return prj
 
         # random NN projections
         elif self.n_proj > 1 and not self.use_linear_proj:
@@ -365,57 +367,6 @@ class SWIL(PPO):
                     diff_i = a_new_i - a_i
                     rew = torch.where(diff_i > diff_h, diff_h, diff_i)
 
-                # TODO: what if target CDF is left or mixed with source CDF?
-                # for j, i in enumerate(idx):
-                #     rew_j = 0
-
-                #     # calculate diff when replacing atom
-                #     a_prev = (sorted_proj_tgt[i, j] - sorted_proj[i, j]) ** 2
-                #     a_new = (sorted_proj_tgt[i, j] - obs_t_slice[0, j]) ** 2
-
-                #     a_i = (sorted_proj_tgt[i, j] - sorted_proj[i, j]) ** 2
-                #     a_h = (sorted_proj_tgt[i - 1, j] - sorted_proj[i - 1, j]) ** 2
-                #     a_new_i = (sorted_proj_tgt[i, j] - obs_t_slice[0, j]) ** 2
-                #     a_new_h = (sorted_proj_tgt[i - 1, j] - obs_t_slice[0, j]) ** 2
-
-                #     rew_incr = torch.abs(sorted_proj[i, j] - obs_t_slice[0, j])
-                #     rew_decr = torch.abs(sorted_proj[i - 1, j] - obs_t_slice[0, j])
-
-                #     if self.repl_loss_type == "diff":
-                #         rew_j = a_new - a_prev
-                #         rew += w * (rew_j)
-                #     elif self.repl_loss_type == "diffmax0":
-                #         rew_j = a_new - a_prev
-                #         if rew_j > 0:  # > 0 bc we flip it later
-                #             rew_j = 0
-                #         rew += w * (rew_j)
-                #     elif self.repl_loss_type == "diff2":
-                #         diff_h = a_new_h - a_h
-                #         diff_i = a_new_i - a_i
-                #         rew_j = torch.where(rew_incr > rew_decr, diff_h, diff_i)
-                #         rew += w * (rew_j)
-                #     elif self.repl_loss_type == "diff2max0":
-                #         if rew_incr > rew_decr:
-                #             rew_j = a_new_h - a_h
-                #         else:
-                #             rew_j = a_new_i - a_i
-                #         if rew_j > 0:  # > 0 bc we flip it later
-                #             rew_j = 0
-                #         # XXX: sign problems!!!???
-                #         rew += w * (rew_j)
-
-                #     elif self.repl_loss_type == "diff3":
-                #         rew_j = a_new - a_prev
-                #         if sorted_proj[i, j] > sorted_proj_tgt[i, j]:
-                #             rew += w * rew_j
-                #         else:
-                #             rew -= w * rew_j
-                #     else:
-                #         if rew_incr > rew_decr:
-                #             rew += w * (a_new_h)
-                #         else:
-                #             rew += w * (a_new_i)
-
         return rew
 
     def update_discriminator(self):
@@ -460,8 +411,9 @@ class SWIL(PPO):
                 )
                 d_loss_avg += d_loss.item()
                 update_cnt += 1
-                self.optimizer_d.zero_grad()
-                d_loss.backward()
-                self.optimizer_d.step()
+                if not self.use_linear_proj:
+                    self.optimizer_d.zero_grad()
+                    d_loss.backward()
+                    self.optimizer_d.step()
 
         return d_loss_avg / update_cnt

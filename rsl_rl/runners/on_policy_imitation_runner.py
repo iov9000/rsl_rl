@@ -61,6 +61,7 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                 num_disc_obs,
                 use_spectral_norm=self.imitation_cfg.use_spectral_norm,
                 use_weight_norm=self.imitation_cfg.use_weight_norm,
+                activation=self.imitation_cfg.activation,
             ).to(self.device),
             il_opt=self.imitation_cfg,
             device=self.device,
@@ -214,7 +215,8 @@ class OnPolicyImitationRunner(OnPolicyRunner):
             learn_time = stop - start
             self.current_learning_iteration = it
 
-            d_loss = self.alg_il.update_discriminator()
+            if self.imitation_cfg.learn_discriminator:
+                d_loss = self.alg_il.update_discriminator()
 
             # clear the rollout buffer storage
             self.alg_il.storage.clear()

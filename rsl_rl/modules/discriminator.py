@@ -29,6 +29,7 @@ class Discriminator(nn.Module):
         activation = get_activation(activation)
 
         mlp_input_dim = num_obs
+        self.input_dim = mlp_input_dim
         # Policy
         disc_layers = []
         disc_layers.append(
