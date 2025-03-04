@@ -282,19 +282,7 @@ class SWIL(PPO):
         return torch.cat(input_, axis=-1)
 
     def forward(self, ob, ac, nob=None, d=None):
-        d_out = self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
-
-        if self.divergence_type == "fkl":
-            d_out_div = torch.exp(d_out)  # (N*T,) p/q TODO: clip
-        elif self.divergence_type == "rkl":
-            d_out_div = d_out  # (N*T,) log (p/q)
-        elif (
-            self.divergence_type == "js"
-        ):  # https://pytorch.org/docs/master/generated/torch.nn.Softplus.html
-            d_out_div = torch.nn.functional.softplus(d_out)  # (N*T,) log (1 + p/q)
-
-        # XXX: log D vs log(1-D)!!!!
-        return d_out_div
+        return self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
 
     def get_reward(self, ob, ac, nob=None, d=None):
         with torch.no_grad():
@@ -415,5 +403,102 @@ class SWIL(PPO):
                     self.optimizer_d.zero_grad()
                     d_loss.backward()
                     self.optimizer_d.step()
+
+        return d_loss_avg / update_cnt
+
+
+class NaSWIL(SWIL):
+    """Non-Adversarial Sliced Wasserstein Imitation Learning"""
+
+    def compute_loss(
+        self,
+        obs_pi,
+        acs_pi,
+        nobs_pi,
+        d_pi,
+        obs_pi_2,
+        acs_pi_2,
+        nobs_pi_2,
+        d_pi_2,
+    ):
+        # project atoms with same random projections
+        pi_slices, _, _, _ = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)
+        pi_slices_2, _, _, _ = self.proj(
+            obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2, keep_proj=True
+        )
+
+        pred_diffs = self.forward(obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2)
+
+        with torch.no_grad():
+            # sort transposed slices
+            pi_slices_sorted, _ = torch.sort(pi_slices, dim=0, stable=True)
+            # exp_slices_sorted, exp_slices_sorted_idx = torch.sort(exp_slices, dim=0, stable=True)
+
+            # sort and insert using torch.searchsorted
+            idx_j = torch.searchsorted(
+                pi_slices_sorted.T.contiguous(), pi_slices_2.T.contiguous()
+            )
+
+            # if 0: idx = 0, if len(pi_slices_sorted): idx = -1 else:
+            # (by default, searchsorted output idx replaces next largest item in sorted array)
+            # min(b2[k]-b1_s[i], b2[k]-b1_s[j])
+
+            idx_j[torch.where(idx_j == idx_j.shape[-1])] -= 1
+            idx_i = idx_j - 1
+            assert torch.sum(idx_j - idx_i) > 0
+            idx_i[torch.where(idx_i == -1)] += 1
+
+            # get first batch at indices
+            b1_s_i = torch.take_along_dim(pi_slices_sorted.T, idx_i, dim=1).T
+            b1_s_j = torch.take_along_dim(pi_slices_sorted.T, idx_j, dim=1).T
+
+            # compute distances for all indices
+            diffs = torch.minimum(b1_s_i - pi_slices_2, b1_s_j - pi_slices_2)
+
+        # sum up loss and return it
+        l2_pred_diff_loss = torch.sum(torch.nn.functional.mse_loss(pred_diffs, diffs))
+
+        return l2_pred_diff_loss
+
+    def get_reward(self, ob, ac, nob=None, d=None):
+        return self.forward(ob, ac, nob, d)
+
+    def update_discriminator(self):
+        d_loss_avg = 0
+        update_cnt = 0
+        for epoch in range(self.num_irl_epochs):
+            rollout_buffer_batch = self.storage.get_random_batch(
+                self.irl_batch_size, flatten=True
+            )
+            obs_batch = rollout_buffer_batch["observations"]
+            actions_batch = rollout_buffer_batch["actions"]
+            next_obs_batch = rollout_buffer_batch["next_observations"]
+            dones_batch = rollout_buffer_batch["dones"]
+
+            rollout_buffer_batch_2 = self.storage.get_random_batch(
+                self.irl_batch_size, flatten=True
+            )
+            obs_batch_2 = rollout_buffer_batch_2["observations"]
+            actions_batch_2 = rollout_buffer_batch_2["actions"]
+            next_obs_batch_2 = rollout_buffer_batch_2["next_observations"]
+            dones_batch_2 = rollout_buffer_batch_2["dones"]
+
+            d_loss = self.compute_loss(
+                obs_batch,
+                actions_batch,
+                next_obs_batch,
+                dones_batch,
+                obs_batch_2,
+                actions_batch_2,
+                next_obs_batch_2,
+                dones_batch_2,
+            )
+
+            d_loss_avg += d_loss.item()
+            update_cnt += 1
+
+            self.optimizer_d.zero_grad()
+            d_loss.backward()
+            self.optimizer_d.step()
 
         return d_loss_avg / update_cnt

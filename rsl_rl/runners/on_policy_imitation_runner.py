@@ -13,7 +13,7 @@ from argparse import Namespace
 from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 
 import rsl_rl
-from rsl_rl.algorithms import GAIL, SWIL
+from rsl_rl.algorithms import GAIL, SWIL, NaSWIL
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import Discriminator
 from rsl_rl.runners.on_policy_runner import OnPolicyRunner
@@ -31,6 +31,8 @@ class OnPolicyImitationRunner(OnPolicyRunner):
         self.imitation_cfg = Namespace(**train_cfg["imitation"])
         if self.imitation_cfg.algo == "SWIL":
             imitation_class = SWIL
+        elif self.imitation_cfg.algo == "NaSWIL":
+            imitation_class = NaSWIL
         else:
             imitation_class = GAIL
 
@@ -215,7 +217,10 @@ class OnPolicyImitationRunner(OnPolicyRunner):
             learn_time = stop - start
             self.current_learning_iteration = it
 
-            if self.imitation_cfg.learn_discriminator:
+            if (
+                self.imitation_cfg.learn_discriminator
+                and it % self.imitation_cfg.discriminator_update_period == 0
+            ):
                 d_loss = self.alg_il.update_discriminator()
 
             # clear the rollout buffer storage
