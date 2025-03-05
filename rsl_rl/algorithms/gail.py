@@ -292,4 +292,6 @@ class GAIL(PPO):
                 d_loss.backward()
                 self.optimizer_d.step()
 
-        return d_loss_avg / update_cnt
+        update_dict = {"d_loss": d_loss_avg / update_cnt}
+
+        return update_dict

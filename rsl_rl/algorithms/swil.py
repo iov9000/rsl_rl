@@ -404,7 +404,9 @@ class SWIL(PPO):
                     d_loss.backward()
                     self.optimizer_d.step()
 
-        return d_loss_avg / update_cnt
+        update_dict = {"d_loss": d_loss_avg / update_cnt}
+
+        return update_dict
 
 
 class NaSWIL(SWIL):
@@ -422,10 +424,8 @@ class NaSWIL(SWIL):
         d_pi_2,
     ):
         # project atoms with same random projections
-        pi_slices, _, _, _ = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)
-        pi_slices_2, _, _, _ = self.proj(
-            obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2, keep_proj=True
-        )
+        pi_slices = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)
+        pi_slices_2 = self.proj(obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2, keep_proj=True)
 
         pred_diffs = self.forward(obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2)
 
@@ -453,15 +453,16 @@ class NaSWIL(SWIL):
             b1_s_j = torch.take_along_dim(pi_slices_sorted.T, idx_j, dim=1).T
 
             # compute distances for all indices
-            diffs = torch.minimum(b1_s_i - pi_slices_2, b1_s_j - pi_slices_2)
+            diffs = -torch.minimum(b1_s_i - pi_slices_2, b1_s_j - pi_slices_2)
 
         # sum up loss and return it
         l2_pred_diff_loss = torch.sum(torch.nn.functional.mse_loss(pred_diffs, diffs))
 
-        return l2_pred_diff_loss
+        return l2_pred_diff_loss, diffs
 
     def get_reward(self, ob, ac, nob=None, d=None):
-        return self.forward(ob, ac, nob, d)
+        reward = torch.squeeze(self.forward(ob, ac, nob, d))
+        return reward
 
     def update_discriminator(self):
         d_loss_avg = 0
@@ -483,7 +484,7 @@ class NaSWIL(SWIL):
             next_obs_batch_2 = rollout_buffer_batch_2["next_observations"]
             dones_batch_2 = rollout_buffer_batch_2["dones"]
 
-            d_loss = self.compute_loss(
+            d_loss, diffs = self.compute_loss(
                 obs_batch,
                 actions_batch,
                 next_obs_batch,
@@ -501,4 +502,6 @@ class NaSWIL(SWIL):
             d_loss.backward()
             self.optimizer_d.step()
 
-        return d_loss_avg / update_cnt
+        update_dict = {"d_loss": d_loss_avg / update_cnt, "diffs": diffs}
+
+        return update_dict

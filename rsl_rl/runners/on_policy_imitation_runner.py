@@ -221,7 +221,10 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                 self.imitation_cfg.learn_discriminator
                 and it % self.imitation_cfg.discriminator_update_period == 0
             ):
-                d_loss = self.alg_il.update_discriminator()
+                update_dict = self.alg_il.update_discriminator()
+                d_loss = update_dict["d_loss"]
+                if "diffs" in update_dict.keys():
+                    diffs = update_dict["diffs"]
 
             # clear the rollout buffer storage
             self.alg_il.storage.clear()
@@ -283,6 +286,9 @@ class OnPolicyImitationRunner(OnPolicyRunner):
             "Loss/surrogate", locs["mean_surrogate_loss"], locs["it"]
         )
         self.writer.add_scalar("Loss/d_loss", locs["d_loss"], locs["it"])
+        if "diffs" in locs.keys():
+            self.writer.add_histogram("Loss/diffs", locs["diffs"], locs["it"])
+
         self.writer.add_scalar(
             "Loss/learning_rate", self.alg_il.learning_rate, locs["it"]
         )
