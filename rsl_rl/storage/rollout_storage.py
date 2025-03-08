@@ -503,9 +503,10 @@ class DemoBuffer:
         else:
             indices = torch.arange(buffer_size - 1, device=self.device)
 
-        for i in range(batch_size, buffer_size - 1, batch_size):
-            start = i
-            end = i + batch_size
+        num_batches = buffer_size // batch_size
+        for i in range(num_batches):
+            start = i * batch_size
+            end = (i + 1) * batch_size
             batch_idx = indices[start:end]
 
             if flatten:

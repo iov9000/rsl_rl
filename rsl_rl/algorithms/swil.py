@@ -309,11 +309,9 @@ class SWIL(PPO):
                     torch.transpose(sorted_proj, 0, -1), obs_t_slice.unsqueeze(0)
                 ).squeeze()  # , right=True)
 
+                # shift extreme indices
                 idx[idx == n] -= 1
                 idx[torch.where(idx == -1)] += 1
-
-                # shift extreme indices
-                w = 1
 
                 if self.repl_loss_type == "diff":
                     a_prev = (
@@ -436,7 +434,7 @@ class NaSWIL(SWIL):
 
             # sort and insert using torch.searchsorted
             idx_j = torch.searchsorted(
-                pi_slices_sorted.T.contiguous(), pi_slices_2.T.contiguous()
+                pi_slices_sorted.contiguous(), pi_slices_2.contiguous()
             )
 
             # if 0: idx = 0, if len(pi_slices_sorted): idx = -1 else:
@@ -449,8 +447,8 @@ class NaSWIL(SWIL):
             idx_i[torch.where(idx_i == -1)] += 1
 
             # get first batch at indices
-            b1_s_i = torch.take_along_dim(pi_slices_sorted.T, idx_i, dim=1).T
-            b1_s_j = torch.take_along_dim(pi_slices_sorted.T, idx_j, dim=1).T
+            b1_s_i = torch.take_along_dim(pi_slices_sorted, idx_i, dim=1)
+            b1_s_j = torch.take_along_dim(pi_slices_sorted, idx_j, dim=1)
 
             # compute distances for all indices
             diffs = -torch.minimum(b1_s_i - pi_slices_2, b1_s_j - pi_slices_2)
