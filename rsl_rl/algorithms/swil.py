@@ -451,7 +451,13 @@ class NaSWIL(SWIL):
             b1_s_j = torch.take_along_dim(pi_slices_sorted, idx_j, dim=1)
 
             # compute distances for all indices
-            diffs = -torch.minimum(b1_s_i - pi_slices_2, b1_s_j - pi_slices_2)
+            if self.repl_loss_type == "diff2":
+                diffs = -torch.minimum(b1_s_i - pi_slices_2, b1_s_j - pi_slices_2)
+            elif self.repl_loss_type == "diff2max0":
+                diffs = torch.minimum(
+                    (pi_slices_2 - b1_s_i).clamp_(0, None),
+                    (pi_slices_2 - b1_s_j).clamp_(0, None),
+                )
 
         # sum up loss and return it
         l2_pred_diff_loss = torch.sum(torch.nn.functional.mse_loss(pred_diffs, diffs))
