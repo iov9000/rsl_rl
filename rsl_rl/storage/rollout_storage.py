@@ -482,6 +482,33 @@ class DemoBuffer:
 
         return buffer_size // batch_size
 
+    def get_random_batch(self, batch_size, shuffle=True, flatten=True):
+        if flatten:
+            observations = self.observations.flatten(0, 1)
+            next_observations = self.next_observations.flatten(0, 1)
+            actions = self.actions.flatten(0, 1)
+            dones = self.dones.flatten(0, 1)
+
+        else:
+            observations = self.observations
+            next_observations = self.next_observations
+            actions = self.actions
+            dones = self.dones
+
+        # here, take len(actions) it is smaller than len(observations)
+        if shuffle:
+            indices = torch.randint(0, len(actions), (batch_size,), device=self.device)
+        else:
+            idx = torch.randint(0, len(actions) - batch_size, (1,)).item()
+            indices = torch.arange(idx, idx + batch_size, device=self.device)
+
+        return {
+            "observations": observations[indices],
+            "next_observations": next_observations[indices],
+            "actions": actions[indices],
+            "dones": dones[indices],
+        }
+
     def mini_batch_generator(self, batch_size, shuffle=False, flatten=True):
         if flatten:
             observations = self.observations.flatten(0, 1)

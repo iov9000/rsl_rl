@@ -352,6 +352,29 @@ class SWIL(PPO):
                     diff_h = a_new_h - a_h
                     diff_i = a_new_i - a_i
                     rew = torch.where(diff_i > diff_h, diff_h, diff_i)
+                elif self.repl_loss_type == "expert_diff":
+                    idx_i = idx.long()
+                    idx_h = (idx.long() - 1).clamp_(0, None)
+
+                    sorted_proj_tgt_i = sorted_proj_tgt[idx_i].squeeze()
+                    sorted_proj_tgt_h = sorted_proj_tgt[idx_h].squeeze()
+                    sorted_proj_i = torch.gather(
+                        sorted_proj, 0, idx_i.view(1, sorted_proj.shape[1], 1)
+                    ).squeeze()
+                    sorted_proj_h = torch.gather(
+                        sorted_proj,
+                        0,
+                        idx_h.view(1, sorted_proj.shape[1], 1),
+                    ).squeeze()
+
+                    obs_t_slice = obs_t_slice.squeeze()
+
+                    a_i = (sorted_proj_tgt_i - sorted_proj_i) ** 2
+                    a_h = (sorted_proj_tgt_h - sorted_proj_h) ** 2
+                    a_new_i = (sorted_proj_tgt_i - obs_t_slice) ** 2
+                    a_new_h = (sorted_proj_tgt_h - obs_t_slice) ** 2
+
+                    rew = -(a_new_i + a_new_h) / 2
 
         return rew
 
@@ -420,17 +443,23 @@ class NaSWIL(SWIL):
         acs_pi_2,
         nobs_pi_2,
         d_pi_2,
+        exp_obs,
+        exp_acs,
+        exp_nobs,
+        exp_dones,
     ):
         # project atoms with same random projections
+
         pi_slices = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)
         pi_slices_2 = self.proj(obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2, keep_proj=True)
+        exp_slices = self.proj(exp_obs, exp_acs, exp_nobs, exp_dones, keep_proj=True)
 
         pred_diffs = self.forward(obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2)
 
         with torch.no_grad():
             # sort transposed slices
             pi_slices_sorted, _ = torch.sort(pi_slices, dim=0, stable=True)
-            # exp_slices_sorted, exp_slices_sorted_idx = torch.sort(exp_slices, dim=0, stable=True)
+            exp_slices_sorted, _ = torch.sort(exp_slices, dim=0, stable=True)
 
             # sort and insert using torch.searchsorted
             idx_j = torch.searchsorted(
@@ -448,15 +477,22 @@ class NaSWIL(SWIL):
 
             # get first batch at indices
             b1_s_i = torch.take_along_dim(pi_slices_sorted, idx_i, dim=1)
+            expb_s_i = torch.take_along_dim(exp_slices_sorted, idx_i, dim=1)
             b1_s_j = torch.take_along_dim(pi_slices_sorted, idx_j, dim=1)
+            expb_s_j = torch.take_along_dim(exp_slices_sorted, idx_j, dim=1)
 
             # compute distances for all indices
             if self.repl_loss_type == "diff2":
+                # diffs = -torch.minimum((b1_s_i - pi_slices_2), (b1_s_j - pi_slices_2))
                 diffs = -torch.minimum(b1_s_i - pi_slices_2, b1_s_j - pi_slices_2)
             elif self.repl_loss_type == "diff2max0":
                 diffs = torch.minimum(
                     (pi_slices_2 - b1_s_i).clamp_(0, None),
                     (pi_slices_2 - b1_s_j).clamp_(0, None),
+                )
+            elif self.repl_loss_type == "expert_diff":
+                diffs = -torch.minimum(
+                    torch.abs(b1_s_i - expb_s_i), torch.abs(b1_s_j - expb_s_j)
                 )
 
         # sum up loss and return it
@@ -488,6 +524,14 @@ class NaSWIL(SWIL):
             next_obs_batch_2 = rollout_buffer_batch_2["next_observations"]
             dones_batch_2 = rollout_buffer_batch_2["dones"]
 
+            exp_buffer_batch = self.demos_storage.get_random_batch(
+                self.irl_batch_size, flatten=True
+            )
+            exp_obs_batch = exp_buffer_batch["observations"]
+            exp_actions_batch = exp_buffer_batch["actions"]
+            exp_next_obs_batch = exp_buffer_batch["next_observations"]
+            exp_dones_batch = exp_buffer_batch["dones"]
+
             d_loss, diffs = self.compute_loss(
                 obs_batch,
                 actions_batch,
@@ -497,6 +541,10 @@ class NaSWIL(SWIL):
                 actions_batch_2,
                 next_obs_batch_2,
                 dones_batch_2,
+                exp_obs_batch,
+                exp_actions_batch,
+                exp_next_obs_batch,
+                exp_dones_batch,
             )
 
             d_loss_avg += d_loss.item()
