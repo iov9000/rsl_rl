@@ -193,6 +193,8 @@ class GAIL(PPO):
             loss = torch.nn.functional.binary_cross_entropy_with_logits(d_out, labels)
         elif self.loss_type == "ls":
             loss = torch.sum((expert_out - 1) ** 2 + (policy_out + 1) ** 2)
+        elif self.loss_type == "tv":  # f-GAN style loss
+            loss = torch.mean(expert_out) - torch.mean(policy_out)
 
         return loss
 
@@ -218,6 +220,8 @@ class GAIL(PPO):
             self.divergence_type == "js"
         ):  # https://pytorch.org/docs/master/generated/torch.nn.Softplus.html
             d_out_div = torch.nn.functional.softplus(d_out)  # (N*T,) log (1 + p/q)
+        elif self.divergence_type == "tv":
+            d_out_div = 0.5 * torch.tanh(d_out)
 
         # XXX: log D vs log(1-D)!!!!
         return d_out_div
@@ -233,6 +237,8 @@ class GAIL(PPO):
             self.divergence_type == "js"
         ):  # https://pytorch.org/docs/master/generated/torch.nn.Softplus.html
             d_out_div = torch.nn.functional.softplus(d_out)  # (N*T,) log (1 + p/q)
+        elif self.divergence_type == "tv":
+            d_out_div = 0.5 * torch.tanh(d_out)
 
         # XXX: log D vs log(1-D)!!!!
         if self.loss_type == "bce":
@@ -243,6 +249,8 @@ class GAIL(PPO):
                     torch.zeros_like(d_out_div), 1 - 0.25 * (d_out_div - 1) ** 2
                 )
             )
+        elif self.loss_type == "tv":
+            self.reward = torch.squeeze(-d_out_div)
 
         return self.reward
 

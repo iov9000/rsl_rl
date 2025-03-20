@@ -51,6 +51,10 @@ class SWIL(PPO):
         self.pi_atoms_sorted = deque(maxlen=self.max_q_len)
         self.exp_atoms_sorted = deque(maxlen=self.max_q_len)
 
+        self.rnd = torch.randn(self.n_proj, self.discriminator.input_dim).to(
+            self.device
+        )
+
     def init_storage_from_demos(
         self,
         demos,
@@ -433,6 +437,12 @@ class SWIL(PPO):
 class NaSWIL(SWIL):
     """Non-Adversarial Sliced Wasserstein Imitation Learning"""
 
+    def __init__(self, actor_critic, discriminator, il_opt, device, **kwargs):
+        super().__init__(actor_critic, discriminator, il_opt, device, **kwargs)
+
+        self.pi_slices_sorted = None
+        self.exp_slices_sorted = None
+
     def compute_loss(
         self,
         obs_pi,
@@ -449,17 +459,20 @@ class NaSWIL(SWIL):
         exp_dones,
     ):
         # project atoms with same random projections
-
         pi_slices = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)
         pi_slices_2 = self.proj(obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2, keep_proj=True)
         exp_slices = self.proj(exp_obs, exp_acs, exp_nobs, exp_dones, keep_proj=True)
 
+        # predict differences between expert and policy atoms
         pred_diffs = self.forward(obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2)
 
         with torch.no_grad():
             # sort transposed slices
             pi_slices_sorted, _ = torch.sort(pi_slices, dim=0, stable=True)
             exp_slices_sorted, _ = torch.sort(exp_slices, dim=0, stable=True)
+
+            self.pi_slices_sorted = pi_slices_sorted
+            self.exp_slices_sorted = exp_slices_sorted
 
             # sort and insert using torch.searchsorted
             idx_j = torch.searchsorted(
@@ -491,18 +504,36 @@ class NaSWIL(SWIL):
                     (pi_slices_2 - b1_s_j).clamp_(0, None),
                 )
             elif self.repl_loss_type == "expert_diff":
-                diffs = -torch.minimum(
-                    torch.abs(b1_s_i - expb_s_i), torch.abs(b1_s_j - expb_s_j)
-                )
+                diffs = -torch.abs(b1_s_j - expb_s_j)
+                # diffs = -torch.minimum(
+                #     torch.abs(b1_s_i - expb_s_i), torch.abs(b1_s_j - expb_s_j)
+                # )
 
         # sum up loss and return it
         l2_pred_diff_loss = torch.sum(torch.nn.functional.mse_loss(pred_diffs, diffs))
 
         return l2_pred_diff_loss, diffs
 
-    def get_reward(self, ob, ac, nob=None, d=None):
+    def get_reward_na(self, ob, ac, nob=None, d=None):
         reward = torch.squeeze(self.forward(ob, ac, nob, d))
-        return reward
+        return torch.tanh(reward)
+
+    def get_reward(self, ob, ac, nob=None, d=None):
+        obs_slice = self.proj(ob, ac, nob, d, keep_proj=True)
+
+        if self.pi_slices_sorted is None:
+            return torch.zeros(ob.shape[0], device=self.device)
+        else:
+            idx = torch.searchsorted(self.pi_slices_sorted.t(), obs_slice.t()).t()
+            clamped_indices = torch.clamp(idx, 0, self.pi_slices_sorted.size(0) - 1)
+
+            b1_s_i = torch.gather(self.pi_slices_sorted, dim=0, index=clamped_indices)
+            expb_s_i = torch.gather(
+                self.exp_slices_sorted, dim=0, index=clamped_indices
+            )
+
+            reward = -torch.abs(torch.mean(b1_s_i - expb_s_i, -1))
+            return reward
 
     def update_discriminator(self):
         d_loss_avg = 0
