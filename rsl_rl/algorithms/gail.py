@@ -250,7 +250,7 @@ class GAIL(PPO):
                 )
             )
         elif self.loss_type == "tv":
-            self.reward = torch.squeeze(-d_out_div)
+            self.reward = torch.squeeze(d_out_div)
 
         return self.reward
 
