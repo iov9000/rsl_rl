@@ -63,6 +63,7 @@ class OnPolicyImitationRunner(OnPolicyRunner):
                 num_disc_obs,
                 use_spectral_norm=self.imitation_cfg.use_spectral_norm,
                 use_weight_norm=self.imitation_cfg.use_weight_norm,
+                use_last_layer_weight_norm=self.imitation_cfg.use_last_layer_weight_norm,
                 activation=self.imitation_cfg.activation,
             ).to(self.device),
             il_opt=self.imitation_cfg,

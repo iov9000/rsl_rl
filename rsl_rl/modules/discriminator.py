@@ -22,6 +22,7 @@ class Discriminator(nn.Module):
         activation="elu",
         use_spectral_norm=False,
         use_weight_norm=False,
+        use_last_layer_weight_norm=False,
         device="cpu",
         **kwargs,
     ):
@@ -47,7 +48,7 @@ class Discriminator(nn.Module):
                     linlayer(
                         hidden_dims[layer_index],
                         1,
-                        wnorm=use_weight_norm,
+                        wnorm=use_last_layer_weight_norm,
                         snorm=use_spectral_norm,
                     )
                 )
