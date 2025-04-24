@@ -104,21 +104,36 @@ def demos_gen_dict_isaac(data, batch_size, shuffle=False):
         }
 
 
-def load_il_demos(folder, env_name, subsample, n_demos, load_support=False):
+def load_il_demos(
+    folder, env_name, subsample, n_demos=None, n_steps=None, load_support=False
+):
     if folder is None:
         folder = "demos"
     expert_demos = {}
-    fname = f"demo_il_{env_name}_{n_demos}.pkl"
+    if n_demos is not None:
+        fname = f"demo_il_{env_name}_{n_demos}.pkl"
+    if n_steps is not None:
+        fname = f"{env_name}_{n_steps}_demo_data.pkl"
     try:
         # expert_demos['all'] = np.load(os.path.join(folder, f"demo_hf_{env_name}_{n_demos}.npy"))
         expert_demos = pickle.load(open(os.path.join(folder, fname), "rb"))
 
         # overwrite with subsampled after assigning to support items
         expert_demos["obs"] = expert_demos["obs"][::subsample]
+        if "next_obs" in expert_demos.keys():
+            expert_demos["next_obs"] = expert_demos["next_obs"][::subsample]
+        else:
+            expert_demos["next_obs"] = expert_demos["obs"][::subsample]
         expert_demos["acs"] = expert_demos["acs"][::subsample]
         expert_demos["rew"] = expert_demos["rew"][::subsample]
-        expert_demos["term"] = expert_demos["term"][::subsample]
-        expert_demos["trunc"] = expert_demos["trunc"][::subsample]
+        if "term" in expert_demos.keys():
+            expert_demos["term"] = expert_demos["term"][::subsample]
+        if "trunc" in expert_demos.keys():
+            expert_demos["trunc"] = expert_demos["trunc"][::subsample]
+        else:
+            expert_demos["term"] = expert_demos["dones"][::subsample]
+            expert_demos["trunc"] = expert_demos["dones"][::subsample]
+
     except Exception as e:
         print(e, "Generate demos using models trained in IsaacLab first")
         assert False

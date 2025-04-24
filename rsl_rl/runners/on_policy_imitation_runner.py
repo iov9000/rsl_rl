@@ -54,7 +54,8 @@ class OnPolicyImitationRunner(OnPolicyRunner):
             self.imitation_cfg.demo_dir,
             env.unwrapped.spec.id,
             self.imitation_cfg.demo_subsampling_factor,
-            n_demos=self.imitation_cfg.n_demos,
+            # n_demos=self.imitation_cfg.n_demos,
+            n_steps=self.imitation_cfg.n_steps,
         )
 
         self.alg_il = imitation_class(
