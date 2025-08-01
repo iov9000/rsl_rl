@@ -201,7 +201,9 @@ class SWIL(PPO):
             with torch.no_grad():
                 self.discriminator.apply(ortho_layer_init)
 
-        return self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
+        d_out = self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
+
+        return d_out / torch.norm(d_out, dim=-1, keepdim=True)
 
     def gsw_dist_nn(
         self,
@@ -503,22 +505,26 @@ class NaSWIL(SWIL):
                     (pi_slices_2 - b1_s_i).clamp_(0, None),
                     (pi_slices_2 - b1_s_j).clamp_(0, None),
                 )
+            elif self.repl_loss_type == "diff3":
+                d_i = torch.abs(pi_slices_2 - expb_s_i) - torch.abs(b1_s_i - expb_s_i)
+                d_j = torch.abs(pi_slices_2 - expb_s_j) - torch.abs(b1_s_j - expb_s_j)
+                diffs = -torch.minimum(d_i, d_j)
             elif self.repl_loss_type == "expert_diff":
-                diffs = -torch.abs(b1_s_j - expb_s_j)
-                # diffs = -torch.minimum(
-                #     torch.abs(b1_s_i - expb_s_i), torch.abs(b1_s_j - expb_s_j)
-                # )
+                # diffs = -torch.abs(b1_s_j - expb_s_j)
+                diffs = -torch.minimum(
+                    torch.abs(b1_s_i - expb_s_i), torch.abs(b1_s_j - expb_s_j)
+                )
 
         # sum up loss and return it
         l2_pred_diff_loss = torch.sum(torch.nn.functional.mse_loss(pred_diffs, diffs))
 
         return l2_pred_diff_loss, diffs
 
-    def get_reward_na(self, ob, ac, nob=None, d=None):
-        reward = torch.squeeze(self.forward(ob, ac, nob, d))
-        return torch.tanh(reward)
-
     def get_reward(self, ob, ac, nob=None, d=None):
+        reward = torch.squeeze(self.forward(ob, ac, nob, d))
+        return reward
+
+    def get_reward_(self, ob, ac, nob=None, d=None):
         obs_slice = self.proj(ob, ac, nob, d, keep_proj=True)
 
         if self.pi_slices_sorted is None:

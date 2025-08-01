@@ -125,7 +125,11 @@ def load_il_demos(
         else:
             expert_demos["next_obs"] = expert_demos["obs"][::subsample]
         expert_demos["acs"] = expert_demos["acs"][::subsample]
-        expert_demos["rew"] = expert_demos["rew"][::subsample]
+        if "rews" in expert_demos.keys():
+            expert_demos["rew"] = expert_demos["rews"][::subsample]
+        elif "rew" in expert_demos.keys():
+            expert_demos["rew"] = expert_demos["rew"][::subsample]
+
         if "term" in expert_demos.keys():
             expert_demos["term"] = expert_demos["term"][::subsample]
         if "trunc" in expert_demos.keys():
