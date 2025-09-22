@@ -255,9 +255,6 @@ class GAIL(PPO):
         return self.reward
 
     def update_discriminator(self):
-        demos_generator = self.demos_storage.mini_batch_generator(
-            self.irl_batch_size, shuffle=True, flatten=True
-        )
         # num_mini_batches = self.demos_storage.get_num_minibatches(self.irl_batch_size)
         # generator = self.storage.mini_batch_generator(
         #     num_mini_batches, self.num_irl_epochs, flatten=False
@@ -267,6 +264,9 @@ class GAIL(PPO):
         update_cnt = 0
 
         for epoch in range(self.num_irl_epochs):
+            demos_generator = self.demos_storage.mini_batch_generator(
+                self.irl_batch_size, shuffle=True, flatten=True
+            )
             for demo_buffer_batch in demos_generator:
                 exp_obs_batch = demo_buffer_batch["observations"]
                 exp_actions_batch = demo_buffer_batch["actions"]

@@ -324,16 +324,16 @@ class SWIL(PPO):
                         sorted_proj_tgt[idx.long()] - sorted_proj[idx.long()]
                     ) ** 2
                     a_new = (sorted_proj_tgt[idx.long()] - obs_t_slice) ** 2
-                    rew_j = a_new - a_prev
+                    rew = a_new - a_prev
                 elif self.repl_loss_type == "diffmax0":
                     a_prev = (
                         sorted_proj_tgt[idx.long()] - sorted_proj[idx.long()]
                     ) ** 2
                     a_new = (sorted_proj_tgt[idx.long()] - obs_t_slice) ** 2
                     a_new[a_new > 0] = 0
-                    rew_j = a_new - a_prev
-                    if rew_j > 0:
-                        rew_j = 0
+                    rew += a_new - a_prev
+                    if rew > 0:
+                        rew = 0
                 elif self.repl_loss_type == "diff2":
                     idx_i = idx.long()
                     idx_h = (idx.long() - 1).clamp_(0, None)
@@ -385,9 +385,6 @@ class SWIL(PPO):
         return rew
 
     def update_discriminator(self):
-        demos_generator = self.demos_storage.mini_batch_generator(
-            self.irl_batch_size, shuffle=True, flatten=False
-        )
         # num_mini_batches = self.demos_storage.get_num_minibatches(self.irl_batch_size)
         # generator = self.storage.mini_batch_generator(
         #     num_mini_batches, self.num_irl_epochs, flatten=False
@@ -397,6 +394,9 @@ class SWIL(PPO):
         update_cnt = 0
 
         for epoch in range(self.num_irl_epochs):
+            demos_generator = self.demos_storage.mini_batch_generator(
+                self.irl_batch_size, shuffle=True, flatten=False
+            )
             for demo_buffer_batch in demos_generator:
                 exp_obs_batch = demo_buffer_batch["observations"]
                 exp_actions_batch = demo_buffer_batch["actions"]
