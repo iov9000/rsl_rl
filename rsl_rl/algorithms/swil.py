@@ -4,11 +4,15 @@ import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 
 from rsl_rl.modules import Discriminator
 from rsl_rl.storage import DemoBuffer
 from rsl_rl.algorithms.ppo import PPO
 from rsl_rl.utils import ortho_layer_init
+from rsl_rl.algorithms.swil_rewards_isaaclab import (
+    build_swil_reward_head_from_cfg,
+)
 
 from collections import deque
 
@@ -23,6 +27,9 @@ class SWIL(PPO):
             device=device,
             **kwargs,
         )
+
+        # keep a reference to full IL options
+        self.il_opt = il_opt
 
         self.il_lr = il_opt.learning_rate
         self.use_actions = il_opt.use_actions
@@ -40,6 +47,10 @@ class SWIL(PPO):
         # SWIL specific arguments
         self.n_proj = il_opt.n_proj
         self.use_linear_proj = il_opt.use_linear_proj
+
+        # Reward selection: LEGACY (default) or one of {SR, DUAL, RPL}
+        self.swil_mode = getattr(il_opt, "swil_mode", None)
+        self.reward_head = None
 
         # SWIL components
         self.discriminator = discriminator
@@ -71,6 +82,37 @@ class SWIL(PPO):
             self.device,
         )
         self.demos_storage.load_demos(demos)
+
+        # Initialize optional reward head (SR/DUAL/RPL) and build expert buffers
+        if self.swil_mode is not None and str(self.swil_mode).upper() in {"SR", "DUAL", "RPL"}:
+            # Build reward head from config and load expert projections
+            self.reward_head = build_swil_reward_head_from_cfg(
+                obs_shape=(obs_shape[-1],),
+                imitation_cfg=self.il_opt,
+                device=self.device,
+            )
+
+            # Prepare demos dict expected by reward head: flatten across time and envs
+            with torch.no_grad():
+                obs = demos["obs"].to(self.device)
+                acs = demos["acs"].to(self.device)
+                # next observations (T, E, D)
+                if "next_obs" in demos:
+                    nobs = demos["next_obs"].to(self.device)
+                else:
+                    nobs = torch.cat((obs[1:], obs[-1].unsqueeze(0)), dim=0)
+                # dones from term OR trunc
+                term = demos["term"].to(self.device)
+                trunc = demos["trunc"].to(self.device)
+                dones = torch.logical_or(term, trunc)
+
+                demos_flat = {
+                    "obs": obs.flatten(0, 1),
+                    "actions": acs.flatten(0, 1),
+                    "next_obs": nobs.flatten(0, 1),
+                    "dones": dones.flatten(0, 1),
+                }
+            self.reward_head.load_expert_from_demos(demos_flat)
 
     def test_mode(self):
         self.actor_critic.test()
@@ -198,8 +240,12 @@ class SWIL(PPO):
 
         # random NN projections
         elif self.n_proj > 1 and not self.use_linear_proj:
-            with torch.no_grad():
-                self.discriminator.apply(ortho_layer_init)
+            # If using a non-linear projection network as a random feature map,
+            # do NOT reinitialize weights on every call; optionally allow
+            # caller to request noise-based refresh via `noise=True`.
+            if noise:
+                with torch.no_grad():
+                    self.discriminator.apply(ortho_layer_init)
 
         d_out = self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
 
@@ -218,33 +264,28 @@ class SWIL(PPO):
         random=False,
     ):
         """
-        Calculates GSW between two empirical state-action distributions.
-        Note that the number of samples is assumed to be equal
-        (This is however not necessary and could be easily extended
-        for empirical distributions with different number of samples)
+        Calculates sliced W2^2 between two empirical distributions under the
+        current projection. Ensures consistent projections between policy and
+        expert by reusing the same directions/params.
         """
         if random:
             with torch.no_grad():
                 self.discriminator.apply(ortho_layer_init)
 
         # project slices
+        # First call may sample directions; second call reuses them
         pi_slices = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)
-        exp_slices = self.proj(obs_exp, acs_exp, nobs_exp, d_exp).unsqueeze(1)
+        exp_slices = self.proj(obs_exp, acs_exp, nobs_exp, d_exp, keep_proj=True)
 
         # sort slices
-        pi_slices_sorted, pi_slices_sorted_idx = torch.sort(
-            pi_slices, dim=0, stable=True
-        )
-        exp_slices_sorted, exp_slices_sorted_idx = torch.sort(
-            exp_slices, dim=0, stable=True
-        )
+        pi_slices_sorted, _ = torch.sort(pi_slices, dim=0, stable=True)
+        exp_slices_sorted, _ = torch.sort(exp_slices, dim=0, stable=True)
 
-        self.pi_atoms_sorted.append(pi_slices_sorted)
-        self.exp_atoms_sorted.append(exp_slices_sorted)
+        self.pi_atoms_sorted.append(pi_slices_sorted.detach())
+        self.exp_atoms_sorted.append(exp_slices_sorted.detach())
 
-        # TODO: figure out shuffling with torch.randperm to keep everything on GPU
-
-        return torch.sqrt(torch.sum((pi_slices_sorted - exp_slices_sorted) ** 2))
+        # sliced W2^2: mean squared difference across samples and slices
+        return (pi_slices_sorted - exp_slices_sorted).pow(2).mean()
 
     def compute_loss(
         self,
@@ -291,6 +332,12 @@ class SWIL(PPO):
         return self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
 
     def get_reward(self, ob, ac, nob=None, d=None):
+        # If a reward head has been configured, use it instead of the legacy path
+        if self.reward_head is not None and self.swil_mode is not None:
+            mode = str(self.swil_mode).upper()
+            rew = self.reward_head.get_reward(ob, ac, nob, d, mode=mode)
+            return torch.squeeze(rew, -1)
+
         with torch.no_grad():
             num_envs = ob.shape[0]
             obs_t_slice = self.discriminator(self.concatenate_inputs(ob, ac, nob, d))
@@ -460,67 +507,139 @@ class NaSWIL(SWIL):
         exp_nobs,
         exp_dones,
     ):
-        # project atoms with same random projections
-        pi_slices = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)
-        pi_slices_2 = self.proj(obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2, keep_proj=True)
-        exp_slices = self.proj(exp_obs, exp_acs, exp_nobs, exp_dones, keep_proj=True)
+        # 1) Project with shared directions
+        pi_slices = self.proj(obs_pi, acs_pi, nobs_pi, d_pi)  # [N, K]
+        pi_slices_2 = self.proj(
+            obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2, keep_proj=True
+        )  # [N, K]
+        exp_slices = self.proj(
+            exp_obs, exp_acs, exp_nobs, exp_dones, keep_proj=True
+        )  # [N, K]
 
-        # predict differences between expert and policy atoms
-        pred_diffs = self.forward(obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2)
+        # 2) Predict scalar diffs with reward NN
+        pred_diffs = self.forward(obs_pi_2, acs_pi_2, nobs_pi_2, d_pi_2)  # [N, 1]
 
         with torch.no_grad():
-            # sort transposed slices
-            pi_slices_sorted, _ = torch.sort(pi_slices, dim=0, stable=True)
-            exp_slices_sorted, _ = torch.sort(exp_slices, dim=0, stable=True)
+            # 3) Sort per slice and transpose to [K, N]
+            pi_slices_sorted, _ = torch.sort(pi_slices, dim=0, stable=True)  # [N, K]
+            exp_slices_sorted, _ = torch.sort(exp_slices, dim=0, stable=True)  # [N, K]
 
             self.pi_slices_sorted = pi_slices_sorted
             self.exp_slices_sorted = exp_slices_sorted
 
-            # sort and insert using torch.searchsorted
-            idx_j = torch.searchsorted(
-                pi_slices_sorted.contiguous(), pi_slices_2.contiguous()
-            )
+            A = pi_slices_sorted.transpose(0, 1).contiguous()  # [K, N], sorted per row
+            E = exp_slices_sorted.transpose(0, 1).contiguous()  # [K, N], sorted per row
+            V = pi_slices_2.transpose(0, 1).contiguous()  # [K, N]
+            N = A.shape[1]
 
-            # if 0: idx = 0, if len(pi_slices_sorted): idx = -1 else:
-            # (by default, searchsorted output idx replaces next largest item in sorted array)
-            # min(b2[k]-b1_s[i], b2[k]-b1_s[j])
-
-            idx_j[torch.where(idx_j == idx_j.shape[-1])] -= 1
+            # 4) Neighbor indices where each V would be inserted into A
+            idx_j = torch.searchsorted(A, V, right=False)  # [K, N] in [0..N]
+            idx_j = torch.clamp(idx_j, 1, N - 1)
             idx_i = idx_j - 1
-            assert torch.sum(idx_j - idx_i) > 0
-            idx_i[torch.where(idx_i == -1)] += 1
 
-            # get first batch at indices
-            b1_s_i = torch.take_along_dim(pi_slices_sorted, idx_i, dim=1)
-            expb_s_i = torch.take_along_dim(exp_slices_sorted, idx_i, dim=1)
-            b1_s_j = torch.take_along_dim(pi_slices_sorted, idx_j, dim=1)
-            expb_s_j = torch.take_along_dim(exp_slices_sorted, idx_j, dim=1)
+            # 5) Gather neighbors in policy and expert at same ranks
+            a_i = torch.gather(A, 1, idx_i)  # [K, N]
+            a_j = torch.gather(A, 1, idx_j)  # [K, N]
+            e_i = torch.gather(E, 1, idx_i)  # [K, N]
+            e_j = torch.gather(E, 1, idx_j)  # [K, N]
 
-            # compute distances for all indices
+            # 6) Per-slice replacement targets
             if self.repl_loss_type == "diff2":
-                # diffs = -torch.minimum((b1_s_i - pi_slices_2), (b1_s_j - pi_slices_2))
-                diffs = -torch.minimum(b1_s_i - pi_slices_2, b1_s_j - pi_slices_2)
+                # Nearest-neighbor distance (UNSIGNED). If you want signed, see below.
+                diffs_per_slice = torch.minimum(torch.abs(V - a_i), torch.abs(V - a_j))
+            elif self.repl_loss_type == "diff2_signed":
+                # Signed distance toward the closer neighbor (useful if your head predicts signed deltas)
+                left = V - a_i  # >0 if V is to the right of left neighbor
+                right = a_j - V  # >0 if V is to the left of right neighbor
+                use_left = torch.abs(left) <= torch.abs(right)
+                nn_dist = torch.where(use_left, torch.abs(left), torch.abs(right))
+                nn_sign = torch.where(
+                    use_left, torch.sign(left), -torch.sign(right)
+                )  # toward nearest
+                diffs_per_slice = nn_sign * nn_dist
             elif self.repl_loss_type == "diff2max0":
-                diffs = torch.minimum(
-                    (pi_slices_2 - b1_s_i).clamp_(0, None),
-                    (pi_slices_2 - b1_s_j).clamp_(0, None),
+                # Distance to the nearest boundary only if V is BETWEEN neighbors, else 0
+                diffs_per_slice = torch.minimum(
+                    (V - a_i).clamp_min(0.0), (a_j - V).clamp_min(0.0)
                 )
             elif self.repl_loss_type == "diff3":
-                d_i = torch.abs(pi_slices_2 - expb_s_i) - torch.abs(b1_s_i - expb_s_i)
-                d_j = torch.abs(pi_slices_2 - expb_s_j) - torch.abs(b1_s_j - expb_s_j)
-                diffs = -torch.minimum(d_i, d_j)
+                # "Replacement gain" relative to expert: how much closer V is to expert than neighbor
+                d_i = torch.abs(V - e_i) - torch.abs(a_i - e_i)
+                d_j = torch.abs(V - e_j) - torch.abs(a_j - e_j)
+                diffs_per_slice = -torch.minimum(d_i, d_j)
             elif self.repl_loss_type == "expert_diff":
-                # diffs = -torch.abs(b1_s_j - expb_s_j)
-                diffs = -torch.minimum(
-                    torch.abs(b1_s_i - expb_s_i), torch.abs(b1_s_j - expb_s_j)
+                # Expert difficulty around the insertion rank (independent of V except via ranks)
+                diffs_per_slice = -torch.minimum(
+                    torch.abs(a_i - e_i), torch.abs(a_j - e_j)
+                )
+            elif self.repl_loss_type == "expert_diff_smooth":
+                # After searchsorted:
+                t = (V - a_i) / (a_j - a_i + 1e-12)  # [K, N], in [0,1] inside interval
+                r = (idx_i + t).to(torch.float32)  # fractional rank in [0, N-1]
+
+                # Interpolate policy/expert values at the same fractional rank
+                a_interp = a_i + t * (a_j - a_i)  # policy at r
+                e_interp = e_i + t * (e_j - e_i)  # expert at r
+
+                # Smooth expert_diff:
+                diffs_per_slice = -(a_interp - e_interp).abs()  # [K, N]
+            else:
+                # Fallback: same as expert_diff
+                diffs_per_slice = -torch.minimum(
+                    torch.abs(a_i - e_i), torch.abs(a_j - e_j)
                 )
 
-        # sum up loss and return it
-        l2_pred_diff_loss = torch.sum(torch.nn.functional.mse_loss(pred_diffs, diffs))
+            # 7) Aggregate across slices -> scalar per sample
+            # target = diffs_per_slice.mean(dim=0, keepdim=True).transpose(0, 1)  # [N, 1]
+            target = diffs_per_slice.mean(dim=0, keepdim=True).transpose(0, 1)  # [N,1]
+            target = target / (
+                target.abs().mean() + 1e-6
+            )  # optional per-batch scale norm
 
-        return l2_pred_diff_loss, diffs
+            # with torch.no_grad():
+            #     # edge counts: how often searchsorted clamped
+            #     edge_mask = (idx_j == 1) | (idx_j == N - 1)
+            #     edge_frac = edge_mask.float().mean().item()
+
+            #     # per-slice stats
+            #     slice_std = diffs_per_slice.std(dim=1).mean().item()
+            #     slice_mean = diffs_per_slice.mean().item()
+
+            #     # target stats
+            #     tgt_mean = target.mean().item()
+            #     tgt_std = target.std().item()
+            #     tgt_min = target.min().item()
+            #     tgt_max = target.max().item()
+
+            #     # correlation with predictions
+            #     if pred_diffs.numel() == target.numel():
+            #         corr = torch.corrcoef(
+            #             torch.stack([pred_diffs.flatten(), target.flatten()])
+            #         )[0, 1].item()
+            #     else:
+            #         corr = float("nan")
+
+            #     print(
+            #         f"[Batch stats] edge_frac={edge_frac:.2f}, "
+            #         f"slice_std={slice_std:.4f}, slice_mean={slice_mean:.4f}, "
+            #         f"target_mean={tgt_mean:.4f}, target_std={tgt_std:.4f}, "
+            #         f"target_range=[{tgt_min:.4f}, {tgt_max:.4f}], "
+            #         f"corr(pred,target)={corr:.3f}"
+            #     )
+
+        # 8) Regress reward head to target
+        # l2_pred_diff_loss = F.mse_loss(pred_diffs, target)
+        l2_pred_diff_loss = F.smooth_l1_loss(pred_diffs, target)
+
+        # 9) For logging: [N, K]
+        return l2_pred_diff_loss, diffs_per_slice.transpose(0, 1)
 
     def get_reward(self, ob, ac, nob=None, d=None):
+        # Use reward head if configured, otherwise fall back to NaSWIL regressor output
+        if self.reward_head is not None and self.swil_mode is not None:
+            mode = str(self.swil_mode).upper()
+            rew = self.reward_head.get_reward(ob, ac, nob, d, mode=mode)
+            return torch.squeeze(rew, -1)
         reward = torch.squeeze(self.forward(ob, ac, nob, d))
         return reward
 
