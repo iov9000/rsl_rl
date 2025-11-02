@@ -118,7 +118,12 @@ class ActorCritic(nn.Module):
         # action_logstd = torch.tanh(self.std.expand_as(mean))
         # log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (action_logstd + 1)
         # action_std = torch.exp(log_std)
-        self.distribution = Normal(mean, mean * 0.0 + self.std)
+        # Ensure the standard deviation used for sampling stays positive and finite.
+        # Optimization may otherwise drive the raw parameter negative or NaN, which
+        # breaks torch.normal.
+        std = torch.clamp(self.std, min=1e-6)
+        std = torch.nan_to_num(std, nan=1e-3, posinf=1e3, neginf=1e-3)
+        self.distribution = Normal(mean, mean * 0.0 + std)
 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
