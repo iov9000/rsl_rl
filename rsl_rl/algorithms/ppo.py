@@ -209,13 +209,12 @@ class PPO:
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_surrogate_loss_cf = 0
-        if self.actor_critic.is_recurrent:
-            generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        if self.policy.is_recurrent:
+            generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for batch in generator:
             obs_batch = batch["observations"]
-            critic_obs_batch = batch["critic_observations"]
             actions_batch = batch["actions"]
             old_actions_log_prob_batch = batch["old_actions_log_prob"]
             returns_batch = batch["returns"]
@@ -227,15 +226,6 @@ class PPO:
             old_mu_batch = batch["mu"]
             num_aug = 1  # Number of augmentations per sample. Starts at 1 for no augmentation.
             original_batch_size = obs_batch.batch_size[0]
-            # Compute the actions and values
-            self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
-            actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-            value_batch = self.actor_critic.evaluate(
-                critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
-            )
-            mu_batch = self.actor_critic.action_mean
-            sigma_batch = self.actor_critic.action_std
-            entropy_batch = self.actor_critic.entropy
 
             # Check if we should normalize advantages per mini batch
             if self.normalize_advantage_per_mini_batch:
@@ -262,9 +252,13 @@ class PPO:
 
             # Recompute actions log prob and entropy for current batch of transitions
             # Note: We need to do this because we updated the policy with the new parameters
-            self.policy.act(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[0])
+
+            print("obs is nan?:", obs_batch.apply(torch.isnan).any())
+            print("obs is inf?:", obs_batch.apply(torch.isinf).any())
+
+            self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
-            value_batch = self.policy.evaluate(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[1])
+            value_batch = self.policy.evaluate(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
             # Note: We only keep the entropy of the first augmentation (the original one)
             mu_batch = self.policy.action_mean[:original_batch_size]
             sigma_batch = self.policy.action_std[:original_batch_size]

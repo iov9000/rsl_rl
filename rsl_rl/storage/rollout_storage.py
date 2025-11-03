@@ -256,17 +256,6 @@ class RolloutStorage:
             old_mu = self.mu
             old_sigma = self.sigma
             dones = self.dones
-        # Core
-        observations = self.observations.flatten(0, 1)
-        actions = self.actions.flatten(0, 1)
-        values = self.values.flatten(0, 1)
-        returns = self.returns.flatten(0, 1)
-
-        # For PPO
-        old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
-        advantages = self.advantages.flatten(0, 1)
-        old_mu = self.mu.flatten(0, 1)
-        old_sigma = self.sigma.flatten(0, 1)
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
